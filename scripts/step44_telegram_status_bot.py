@@ -95,20 +95,69 @@ def load_snapshot_json() -> dict:
     return json.loads(completed.stdout)
 
 
+def format_bool(value: object) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    if value is None:
+        return "null"
+    return str(value)
+
+
+def parse_iso_utc(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
 def format_status(snapshot: dict) -> str:
     blocked_by = snapshot.get("guarded_live_path_blocked_by", []) or []
     blocked_text = ", ".join(blocked_by) if blocked_by else "none"
     return "\n".join(
         [
             "Kalshi Agent Status",
-            f"source: {snapshot.get('state_source')}",
-            f"active_candidate_count: {snapshot.get('active_candidate_count')}",
-            f"retired_candidate_count: {snapshot.get('retired_candidate_count')}",
-            f"executor_actionable_now: {snapshot.get('executor_actionable_now')}",
+            f"Source: {snapshot.get('state_source')}",
+            f"Active candidates: {snapshot.get('active_candidate_count')}",
+            f"Retired candidates: {snapshot.get('retired_candidate_count')}",
+            f"Executor actionable now: {format_bool(snapshot.get('executor_actionable_now'))}",
             f"retired_candidate_market_ticker: {snapshot.get('retired_candidate_market_ticker')}",
-            f"guarded_live_path_blocked_by: {blocked_text}",
-            f"execution_mode: {snapshot.get('execution_mode')}",
-            f"snapshot_ts: {snapshot.get('snapshot_ts')}",
+            f"Guarded live path blocked by: {blocked_text}",
+            f"Execution mode: {snapshot.get('execution_mode')}",
+            f"Snapshot ts: {snapshot.get('snapshot_ts')}",
+        ]
+    )
+
+
+def format_queue(snapshot: dict) -> str:
+    return "\n".join(
+        [
+            "Kalshi Queue",
+            f"Active candidates: {snapshot.get('active_candidate_count')}",
+            f"Retired candidates: {snapshot.get('retired_candidate_count')}",
+            f"Top retired ticker: {snapshot.get('retired_candidate_market_ticker')}",
+            f"Executor actionable now: {format_bool(snapshot.get('executor_actionable_now'))}",
+            f"Snapshot source: {snapshot.get('state_source')}",
+        ]
+    )
+
+
+def format_health(snapshot: dict) -> str:
+    now = datetime.now(timezone.utc)
+    snapshot_ts = parse_iso_utc(snapshot.get("snapshot_ts"))
+    age_seconds = None
+    if snapshot_ts is not None:
+        age_seconds = round((now - snapshot_ts).total_seconds(), 1)
+
+    return "\n".join(
+        [
+            "Kalshi Bot Health",
+            "Bot process: up",
+            f"Snapshot source: {snapshot.get('state_source')}",
+            f"Snapshot age seconds: {age_seconds}",
+            f"Execution mode: {snapshot.get('execution_mode')}",
+            f"Checked at: {now.isoformat()}",
         ]
     )
 
@@ -138,11 +187,18 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
             continue
 
         normalized = text.strip().split()[0].lower()
-        if normalized not in {"/status", "/state"}:
+        if normalized not in {"/status", "/state", "/health", "/queue"}:
             continue
 
         snapshot = load_snapshot_json()
-        send_message(base_url, str(chat_id), format_status(snapshot))
+        if normalized in {"/status", "/state"}:
+            response_text = format_status(snapshot)
+        elif normalized == "/queue":
+            response_text = format_queue(snapshot)
+        else:
+            response_text = format_health(snapshot)
+
+        send_message(base_url, str(chat_id), response_text)
 
     return newest_id
 
