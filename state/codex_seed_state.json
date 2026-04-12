@@ -1,0 +1,16 @@
+{
+  "state_source": "seed",
+  "as_of_utc": "2026-04-12T00:00:00Z",
+  "active_candidate_count": 0,
+  "retired_candidate_count": 1,
+  "executor_actionable_now": false,
+  "retired_candidate_market_ticker": "PHILADELPHIA_SPREAD_CANDIDATE",
+  "guarded_live_path_blocked_by": [
+    "freshness_guard",
+    "execution_gate",
+    "market_preflight",
+    "confirm_live_send"
+  ],
+  "execution_mode": "dry_run",
+  "notes": "Repo-visible fallback for cloud tasks when local gitignored logs are unavailable."
+}
