@@ -19,6 +19,7 @@ STATE_PATH = REPO_ROOT / "logs" / "step44" / "telegram_status_bot_state.json"
 STEP43_PATH = REPO_ROOT / "scripts" / "step43_repo_state_snapshot.py"
 STEP45_PATH = REPO_ROOT / "scripts" / "step45_team_status_snapshot.py"
 STEP46_PATH = REPO_ROOT / "scripts" / "step46_control_plane_digest.py"
+STEP47_PATH = REPO_ROOT / "scripts" / "step47_deliberation_cycle.py"
 
 
 def utc_now_iso() -> str:
@@ -121,6 +122,20 @@ def load_digest_json() -> dict:
     if completed.returncode != 0:
         raise RuntimeError(
             f"step46 digest command failed with code {completed.returncode}: {completed.stderr.strip()}"
+        )
+    return json.loads(completed.stdout)
+
+
+def run_deliberation_cycle_json() -> dict:
+    completed = subprocess.run(
+        ["python3", str(STEP47_PATH)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"step47 cycle command failed with code {completed.returncode}: {completed.stderr.strip()}"
         )
     return json.loads(completed.stdout)
 
@@ -251,6 +266,23 @@ def format_digest(digest: dict) -> str:
     )
 
 
+def format_cycle(cycle: dict) -> str:
+    d = cycle.get("deliberation", {})
+    i = cycle.get("inputs", {})
+    return "\n".join(
+        [
+            "Kalshi Deliberation Cycle",
+            f"Priority: {d.get('priority')}",
+            f"Recommended next step: {d.get('recommended_next_step')}",
+            f"Rationale: {d.get('rationale')}",
+            f"Active/retired queue: {i.get('active_candidate_count')}/{i.get('retired_candidate_count')}",
+            f"Executor actionable now: {format_bool(i.get('executor_actionable_now'))}",
+            f"Blocked by: {', '.join(i.get('blocked_by', [])) or 'none'}",
+            f"Cycle ts: {cycle.get('ts')}",
+        ]
+    )
+
+
 def extract_message(update: dict) -> tuple[int | None, str | None, int | None]:
     message = update.get("message") or update.get("edited_message")
     if not message:
@@ -276,7 +308,7 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
             continue
 
         normalized = text.strip().split()[0].lower()
-        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade", "/digest"}:
+        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade", "/digest", "/cycle"}:
             continue
 
         if normalized in {"/status", "/state"}:
@@ -297,6 +329,9 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
         elif normalized == "/digest":
             digest = load_digest_json()
             response_text = format_digest(digest)
+        elif normalized == "/cycle":
+            cycle = run_deliberation_cycle_json()
+            response_text = format_cycle(cycle)
         else:
             team_snapshot = load_team_status_json()
             response_text = format_next_trade(team_snapshot)
