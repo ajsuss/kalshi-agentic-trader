@@ -20,6 +20,7 @@ STEP43_PATH = REPO_ROOT / "scripts" / "step43_repo_state_snapshot.py"
 STEP45_PATH = REPO_ROOT / "scripts" / "step45_team_status_snapshot.py"
 STEP46_PATH = REPO_ROOT / "scripts" / "step46_control_plane_digest.py"
 STEP47_PATH = REPO_ROOT / "scripts" / "step47_deliberation_cycle.py"
+STEP48_LOG_PATH = REPO_ROOT / "logs" / "step48" / "periodic_brain_loop.jsonl"
 
 
 def utc_now_iso() -> str:
@@ -138,6 +139,21 @@ def run_deliberation_cycle_json() -> dict:
             f"step47 cycle command failed with code {completed.returncode}: {completed.stderr.strip()}"
         )
     return json.loads(completed.stdout)
+
+
+def load_latest_brain_iteration() -> dict | None:
+    if not STEP48_LOG_PATH.exists():
+        return None
+    latest = None
+    with STEP48_LOG_PATH.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            if record.get("kind") == "step48_periodic_brain_loop_iteration":
+                latest = record
+    return latest
 
 
 def format_bool(value: object) -> str:
@@ -283,6 +299,32 @@ def format_cycle(cycle: dict) -> str:
     )
 
 
+def format_brain_status(record: dict | None) -> str:
+    if record is None:
+        return "\n".join(
+            [
+                "Kalshi Brain Loop",
+                "No brain loop iterations found yet.",
+                "Run: ./ops/run_brain_loop.sh --iterations 1",
+            ]
+        )
+
+    cycle = record.get("cycle", {}).get("deliberation", {})
+    digest = record.get("digest", {}).get("digest", {})
+    return "\n".join(
+        [
+            "Kalshi Brain Loop",
+            f"Latest iteration: {record.get('iteration')}",
+            f"Priority: {cycle.get('priority')}",
+            f"Recommended step: {cycle.get('recommended_next_step')}",
+            f"Queue active/retired: {digest.get('active_candidate_count')}/{digest.get('retired_candidate_count')}",
+            f"Executor actionable now: {format_bool(digest.get('executor_actionable_now'))}",
+            f"Blocked by: {digest.get('guarded_path_blocked_by_text')}",
+            f"Logged at: {record.get('ts')}",
+        ]
+    )
+
+
 def extract_message(update: dict) -> tuple[int | None, str | None, int | None]:
     message = update.get("message") or update.get("edited_message")
     if not message:
@@ -308,7 +350,7 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
             continue
 
         normalized = text.strip().split()[0].lower()
-        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade", "/digest", "/cycle"}:
+        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade", "/digest", "/cycle", "/brain"}:
             continue
 
         if normalized in {"/status", "/state"}:
@@ -332,6 +374,8 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
         elif normalized == "/cycle":
             cycle = run_deliberation_cycle_json()
             response_text = format_cycle(cycle)
+        elif normalized == "/brain":
+            response_text = format_brain_status(load_latest_brain_iteration())
         else:
             team_snapshot = load_team_status_json()
             response_text = format_next_trade(team_snapshot)
