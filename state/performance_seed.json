@@ -1,0 +1,10 @@
+{
+  "as_of_utc": "2026-04-12T00:00:00Z",
+  "starting_bankroll_usd": 500.0,
+  "current_bankroll_usd": 500.0,
+  "realized_pnl_usd": 0.0,
+  "unrealized_pnl_usd": 0.0,
+  "win_rate": null,
+  "max_drawdown_pct": 0.0,
+  "notes": "Seeded until execution/performance ledger is connected to filled orders."
+}
