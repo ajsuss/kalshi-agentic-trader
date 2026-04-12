@@ -68,7 +68,8 @@ For a lightweight control loop with Telegram status queries:
    - `/cycle`: one read-only deliberation cycle recommendation
    - `/brain`: latest periodic brain-loop iteration status
    - `/performance`: seed-backed performance and brain-loop stats snapshot
-   - `/refresh`: refresh pipeline + decision chain (read-only) and summary
+   - `/refresh`: start refresh pipeline + decision chain in background (read-only)
+   - `/refreshstatus`: latest refresh pipeline summary
 4. Team status seed snapshot:
    - `python3 scripts/step45_team_status_snapshot.py`
    - step45 derives control-plane context from step43 (runtime logs first, seed fallback)
@@ -84,4 +85,4 @@ For a lightweight control loop with Telegram status queries:
 9. Refresh + decide chain:
    - `python3 scripts/step50_refresh_and_decide.py`
 
-`step44` does not place orders. It is read-only and answers `/status`, `/state`, `/queue`, `/health`, `/teams`, `/progress`, `/nexttrade`, `/digest`, `/cycle`, `/brain`, `/performance`, and `/refresh` using step43–step50 snapshots/logs.
+`step44` does not place orders. It is read-only and answers `/status`, `/state`, `/queue`, `/health`, `/teams`, `/progress`, `/nexttrade`, `/digest`, `/cycle`, `/brain`, `/performance`, `/refresh`, and `/refreshstatus` using step43–step50 snapshots/logs.

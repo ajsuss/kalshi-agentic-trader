@@ -23,6 +23,8 @@ STEP47_PATH = REPO_ROOT / "scripts" / "step47_deliberation_cycle.py"
 STEP48_LOG_PATH = REPO_ROOT / "logs" / "step48" / "periodic_brain_loop.jsonl"
 STEP49_PATH = REPO_ROOT / "scripts" / "step49_performance_snapshot.py"
 STEP50_PATH = REPO_ROOT / "scripts" / "step50_refresh_and_decide.py"
+STEP50_LOG_PATH = REPO_ROOT / "logs" / "step50" / "refresh_and_decide.jsonl"
+STEP50_STDOUT_LOG_PATH = REPO_ROOT / "logs" / "step50" / "refresh_command.out"
 
 
 def utc_now_iso() -> str:
@@ -190,6 +192,34 @@ def run_refresh_and_decide_json() -> dict:
             f"step50 refresh command failed with code {completed.returncode}: {completed.stderr.strip()}"
         )
     return json.loads(completed.stdout)
+
+
+def start_refresh_and_decide_background() -> None:
+    STEP50_STDOUT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with STEP50_STDOUT_LOG_PATH.open("a", encoding="utf-8") as log_file:
+        subprocess.Popen(
+            ["python3", str(STEP50_PATH)],
+            cwd=str(REPO_ROOT),
+            stdout=log_file,
+            stderr=log_file,
+            text=True,
+        )
+
+
+def load_latest_refresh_summary() -> dict | None:
+    if not STEP50_LOG_PATH.exists():
+        return None
+
+    latest = None
+    with STEP50_LOG_PATH.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            if record.get("kind") == "step50_refresh_and_decide_summary":
+                latest = record
+    return latest
 
 
 def format_bool(value: object) -> str:
@@ -404,6 +434,18 @@ def format_refresh(summary: dict) -> str:
     )
 
 
+def format_refresh_status(summary: dict | None) -> str:
+    if summary is None:
+        return "\n".join(
+            [
+                "Kalshi Refresh Status",
+                "No step50 refresh summary found yet.",
+                "Run /refresh to start one.",
+            ]
+        )
+    return format_refresh(summary)
+
+
 def extract_message(update: dict) -> tuple[int | None, str | None, int | None]:
     message = update.get("message") or update.get("edited_message")
     if not message:
@@ -429,7 +471,7 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
             continue
 
         normalized = text.strip().split()[0].lower()
-        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade", "/digest", "/cycle", "/brain", "/performance", "/refresh"}:
+        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade", "/digest", "/cycle", "/brain", "/performance", "/refresh", "/refreshstatus"}:
             continue
 
         try:
@@ -459,7 +501,13 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
             elif normalized == "/performance":
                 response_text = format_performance(load_performance_json())
             elif normalized == "/refresh":
-                response_text = format_refresh(run_refresh_and_decide_json())
+                start_refresh_and_decide_background()
+                response_text = (
+                    "Refresh started in background. "
+                    "Use /refreshstatus in ~10-30 seconds for result."
+                )
+            elif normalized == "/refreshstatus":
+                response_text = format_refresh_status(load_latest_refresh_summary())
             else:
                 team_snapshot = load_team_status_json()
                 response_text = format_next_trade(team_snapshot)
