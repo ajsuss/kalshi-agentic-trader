@@ -66,5 +66,6 @@ For a lightweight control loop with Telegram status queries:
    - `/nexttrade`: current next-best-trade readiness summary
 4. Team status seed snapshot:
    - `python3 scripts/step45_team_status_snapshot.py`
+   - step45 derives control-plane context from step43 (runtime logs first, seed fallback)
 
 `step44` does not place orders. It is read-only and answers `/status`, `/state`, `/queue`, `/health`, `/teams`, `/progress`, and `/nexttrade` using step43/step45 snapshots.
