@@ -25,6 +25,7 @@ STEP49_PATH = REPO_ROOT / "scripts" / "step49_performance_snapshot.py"
 STEP50_PATH = REPO_ROOT / "scripts" / "step50_refresh_and_decide.py"
 STEP50_LOG_PATH = REPO_ROOT / "logs" / "step50" / "refresh_and_decide.jsonl"
 STEP50_STDOUT_LOG_PATH = REPO_ROOT / "logs" / "step50" / "refresh_command.out"
+STEP50_PID_PATH = REPO_ROOT / "logs" / "step50" / "refresh_command.pid"
 
 
 def utc_now_iso() -> str:
@@ -194,16 +195,36 @@ def run_refresh_and_decide_json() -> dict:
     return json.loads(completed.stdout)
 
 
-def start_refresh_and_decide_background() -> None:
+def refresh_process_running() -> bool:
+    if not STEP50_PID_PATH.exists():
+        return False
+    try:
+        pid = int(STEP50_PID_PATH.read_text(encoding="utf-8").strip())
+    except Exception:
+        return False
+
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def start_refresh_and_decide_background() -> bool:
+    if refresh_process_running():
+        return False
+
     STEP50_STDOUT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with STEP50_STDOUT_LOG_PATH.open("a", encoding="utf-8") as log_file:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ["python3", str(STEP50_PATH)],
             cwd=str(REPO_ROOT),
             stdout=log_file,
             stderr=log_file,
             text=True,
         )
+    STEP50_PID_PATH.write_text(f"{proc.pid}\n", encoding="utf-8")
+    return True
 
 
 def load_latest_refresh_summary() -> dict | None:
@@ -216,7 +237,10 @@ def load_latest_refresh_summary() -> dict | None:
             line = line.strip()
             if not line:
                 continue
-            record = json.loads(line)
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
             if record.get("kind") == "step50_refresh_and_decide_summary":
                 latest = record
     return latest
@@ -435,6 +459,14 @@ def format_refresh(summary: dict) -> str:
 
 
 def format_refresh_status(summary: dict | None) -> str:
+    if refresh_process_running():
+        return "\n".join(
+            [
+                "Kalshi Refresh Status",
+                "Refresh is currently running.",
+                "Retry /refreshstatus in ~10-30 seconds.",
+            ]
+        )
     if summary is None:
         return "\n".join(
             [
@@ -501,11 +533,16 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
             elif normalized == "/performance":
                 response_text = format_performance(load_performance_json())
             elif normalized == "/refresh":
-                start_refresh_and_decide_background()
-                response_text = (
-                    "Refresh started in background. "
-                    "Use /refreshstatus in ~10-30 seconds for result."
-                )
+                if start_refresh_and_decide_background():
+                    response_text = (
+                        "Refresh started in background. "
+                        "Use /refreshstatus in ~10-30 seconds for result."
+                    )
+                else:
+                    response_text = (
+                        "Refresh already running. "
+                        "Use /refreshstatus for current state."
+                    )
             elif normalized == "/refreshstatus":
                 response_text = format_refresh_status(load_latest_refresh_summary())
             else:

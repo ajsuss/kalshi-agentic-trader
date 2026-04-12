@@ -68,8 +68,8 @@ For a lightweight control loop with Telegram status queries:
    - `/cycle`: one read-only deliberation cycle recommendation
    - `/brain`: latest periodic brain-loop iteration status
    - `/performance`: seed-backed performance and brain-loop stats snapshot
-   - `/refresh`: start refresh pipeline + decision chain in background (read-only)
-   - `/refreshstatus`: latest refresh pipeline summary
+   - `/refresh`: start refresh pipeline + decision chain in background (read-only, single-flight)
+   - `/refreshstatus`: latest refresh pipeline summary (or running status if still in progress)
 4. Team status seed snapshot:
    - `python3 scripts/step45_team_status_snapshot.py`
    - step45 derives control-plane context from step43 (runtime logs first, seed fallback)
