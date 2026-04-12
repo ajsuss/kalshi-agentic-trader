@@ -18,6 +18,7 @@ ENV_PATH = REPO_ROOT / ".env"
 STATE_PATH = REPO_ROOT / "logs" / "step44" / "telegram_status_bot_state.json"
 STEP43_PATH = REPO_ROOT / "scripts" / "step43_repo_state_snapshot.py"
 STEP45_PATH = REPO_ROOT / "scripts" / "step45_team_status_snapshot.py"
+STEP46_PATH = REPO_ROOT / "scripts" / "step46_control_plane_digest.py"
 
 
 def utc_now_iso() -> str:
@@ -106,6 +107,20 @@ def load_team_status_json() -> dict:
     if completed.returncode != 0:
         raise RuntimeError(
             f"step45 team status command failed with code {completed.returncode}: {completed.stderr.strip()}"
+        )
+    return json.loads(completed.stdout)
+
+
+def load_digest_json() -> dict:
+    completed = subprocess.run(
+        ["python3", str(STEP46_PATH)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"step46 digest command failed with code {completed.returncode}: {completed.stderr.strip()}"
         )
     return json.loads(completed.stdout)
 
@@ -217,6 +232,25 @@ def format_next_trade(team_snapshot: dict) -> str:
     )
 
 
+def format_digest(digest: dict) -> str:
+    d = digest.get("digest", {})
+    return "\n".join(
+        [
+            "Kalshi Control Digest",
+            f"Source: {d.get('source')}",
+            f"Execution mode: {d.get('execution_mode')}",
+            f"Queue active/retired: {d.get('active_candidate_count')}/{d.get('retired_candidate_count')}",
+            f"Executor actionable now: {format_bool(d.get('executor_actionable_now'))}",
+            f"Guarded path blocked by: {d.get('guarded_path_blocked_by_text')}",
+            f"Next trade available: {format_bool(d.get('next_best_trade_available'))}",
+            f"Next trade ticker: {d.get('next_best_trade_market_ticker')}",
+            f"Next trade reason: {d.get('next_best_trade_reason')}",
+            f"Phase: {d.get('phase')}",
+            f"Digest ts: {digest.get('ts')}",
+        ]
+    )
+
+
 def extract_message(update: dict) -> tuple[int | None, str | None, int | None]:
     message = update.get("message") or update.get("edited_message")
     if not message:
@@ -242,7 +276,7 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
             continue
 
         normalized = text.strip().split()[0].lower()
-        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade"}:
+        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade", "/digest"}:
             continue
 
         if normalized in {"/status", "/state"}:
@@ -260,6 +294,9 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
         elif normalized == "/progress":
             team_snapshot = load_team_status_json()
             response_text = format_progress(team_snapshot)
+        elif normalized == "/digest":
+            digest = load_digest_json()
+            response_text = format_digest(digest)
         else:
             team_snapshot = load_team_status_json()
             response_text = format_next_trade(team_snapshot)
