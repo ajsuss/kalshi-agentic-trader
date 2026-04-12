@@ -56,7 +56,7 @@ For a lightweight control loop with Telegram status queries:
 2. Telegram `/status` responder (safe, read-only):
    - `python3 scripts/step44_telegram_status_bot.py --run-once`
    - or run continuously: `python3 scripts/step44_telegram_status_bot.py`
-   - or via helper: `./ops/run_status_bot.sh`
+   - or via helper: `./ops/run_status_bot.sh` (auto-installs `requirements-step2-min.txt` if bot deps are missing)
 3. Supported Telegram commands:
    - `/status` or `/state`: normalized control-plane snapshot
    - `/queue`: active/retired queue summary
