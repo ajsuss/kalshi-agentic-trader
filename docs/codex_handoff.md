@@ -47,3 +47,14 @@ When local authoritative logs are not visible to cloud tasks, use this known sta
 
 ## Operator Interaction
 The operator can update `state/codex_seed_state.json` when local state changes and cloud tasks need accurate context before log sync.
+
+## Minimal Operator Commands
+For a lightweight control loop with Telegram status queries:
+
+1. Local snapshot (logs-first, seed fallback):
+   - `python3 scripts/step43_repo_state_snapshot.py`
+2. Telegram `/status` responder (safe, read-only):
+   - `python3 scripts/step44_telegram_status_bot.py --run-once`
+   - or run continuously: `python3 scripts/step44_telegram_status_bot.py`
+
+`step44` does not place orders. It only answers `/status` and `/state` using the normalized snapshot from step43.
