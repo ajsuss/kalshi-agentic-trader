@@ -21,6 +21,7 @@ STEP45_PATH = REPO_ROOT / "scripts" / "step45_team_status_snapshot.py"
 STEP46_PATH = REPO_ROOT / "scripts" / "step46_control_plane_digest.py"
 STEP47_PATH = REPO_ROOT / "scripts" / "step47_deliberation_cycle.py"
 STEP48_LOG_PATH = REPO_ROOT / "logs" / "step48" / "periodic_brain_loop.jsonl"
+STEP49_PATH = REPO_ROOT / "scripts" / "step49_performance_snapshot.py"
 
 
 def utc_now_iso() -> str:
@@ -154,6 +155,20 @@ def load_latest_brain_iteration() -> dict | None:
             if record.get("kind") == "step48_periodic_brain_loop_iteration":
                 latest = record
     return latest
+
+
+def load_performance_json() -> dict:
+    completed = subprocess.run(
+        ["python3", str(STEP49_PATH)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"step49 performance command failed with code {completed.returncode}: {completed.stderr.strip()}"
+        )
+    return json.loads(completed.stdout)
 
 
 def format_bool(value: object) -> str:
@@ -325,6 +340,30 @@ def format_brain_status(record: dict | None) -> str:
     )
 
 
+def format_performance(snapshot: dict) -> str:
+    p = snapshot.get("performance", {})
+    c = snapshot.get("control_plane", {})
+    b = snapshot.get("brain_loop_stats", {})
+
+    return "\n".join(
+        [
+            "Kalshi Performance",
+            f"Starting bankroll: ${p.get('starting_bankroll_usd')}",
+            f"Current bankroll: ${p.get('current_bankroll_usd')}",
+            f"Realized PnL: ${p.get('realized_pnl_usd')}",
+            f"Unrealized PnL: ${p.get('unrealized_pnl_usd')}",
+            f"Win rate: {p.get('win_rate')}",
+            f"Max drawdown %: {p.get('max_drawdown_pct')}",
+            f"Brain iterations: {b.get('iterations_count')}",
+            f"Priority counts: {b.get('priority_counts')}",
+            f"Recommended-step counts: {b.get('recommended_next_step_counts')}",
+            f"Control source: {c.get('state_source')}",
+            f"Execution mode: {c.get('execution_mode')}",
+            f"Snapshot ts: {snapshot.get('ts')}",
+        ]
+    )
+
+
 def extract_message(update: dict) -> tuple[int | None, str | None, int | None]:
     message = update.get("message") or update.get("edited_message")
     if not message:
@@ -350,7 +389,7 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
             continue
 
         normalized = text.strip().split()[0].lower()
-        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade", "/digest", "/cycle", "/brain"}:
+        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade", "/digest", "/cycle", "/brain", "/performance"}:
             continue
 
         if normalized in {"/status", "/state"}:
@@ -376,6 +415,8 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
             response_text = format_cycle(cycle)
         elif normalized == "/brain":
             response_text = format_brain_status(load_latest_brain_iteration())
+        elif normalized == "/performance":
+            response_text = format_performance(load_performance_json())
         else:
             team_snapshot = load_team_status_json()
             response_text = format_next_trade(team_snapshot)

@@ -67,6 +67,7 @@ For a lightweight control loop with Telegram status queries:
    - `/digest`: compact control-plane and next-trade digest
    - `/cycle`: one read-only deliberation cycle recommendation
    - `/brain`: latest periodic brain-loop iteration status
+   - `/performance`: seed-backed performance and brain-loop stats snapshot
 4. Team status seed snapshot:
    - `python3 scripts/step45_team_status_snapshot.py`
    - step45 derives control-plane context from step43 (runtime logs first, seed fallback)
@@ -77,5 +78,7 @@ For a lightweight control loop with Telegram status queries:
 7. Periodic brain loop (read-only):
    - `python3 scripts/step48_periodic_brain_loop.py --iterations 5 --sleep-seconds 60`
    - or helper: `./ops/run_brain_loop.sh --iterations 5 --sleep-seconds 60`
+8. Performance snapshot:
+   - `python3 scripts/step49_performance_snapshot.py`
 
-`step44` does not place orders. It is read-only and answers `/status`, `/state`, `/queue`, `/health`, `/teams`, `/progress`, `/nexttrade`, `/digest`, `/cycle`, and `/brain` using step43/step45/step46/step47 snapshots and step48 logs.
+`step44` does not place orders. It is read-only and answers `/status`, `/state`, `/queue`, `/health`, `/teams`, `/progress`, `/nexttrade`, `/digest`, `/cycle`, `/brain`, and `/performance` using step43/step45/step46/step47 snapshots, step48 logs, and step49 performance stats.
