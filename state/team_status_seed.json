@@ -1,0 +1,46 @@
+{
+  "as_of_utc": "2026-04-12T00:00:00Z",
+  "state_source": "seed",
+  "teams": {
+    "algorithms": {
+      "status": "monitoring",
+      "summary": "Queue-aware dry-run monitoring active; no actionable candidates currently.",
+      "last_update": "2026-04-12T00:00:00Z"
+    },
+    "information_media": {
+      "status": "monitoring",
+      "summary": "Event/news responders idle pending fresh candidate generation.",
+      "last_update": "2026-04-12T00:00:00Z"
+    },
+    "deliberators": {
+      "status": "standby",
+      "summary": "High-conviction deliberation queue empty; human-led approval path preserved.",
+      "last_update": "2026-04-12T00:00:00Z"
+    },
+    "executor": {
+      "status": "blocked",
+      "summary": "Actionable_now false with guarded path blocks enforced.",
+      "last_update": "2026-04-12T00:00:00Z"
+    },
+    "budget_distributor": {
+      "status": "seeded",
+      "summary": "Static seed budget policy active until performance ledger rollout.",
+      "last_update": "2026-04-12T00:00:00Z"
+    }
+  },
+  "next_best_trade": {
+    "available": false,
+    "reason": "No active queue candidates; previously approved Philadelphia spread candidate is retired.",
+    "market_ticker": null,
+    "confidence": null
+  },
+  "progress": {
+    "phase": "phase_1_control_plane",
+    "summary": "Snapshot + Telegram control commands online; team orchestration expansion in progress.",
+    "milestones": [
+      "step43_snapshot_online",
+      "step44_telegram_status_online",
+      "queue_health_commands_online"
+    ]
+  }
+}

@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = REPO_ROOT / ".env"
 STATE_PATH = REPO_ROOT / "logs" / "step44" / "telegram_status_bot_state.json"
 STEP43_PATH = REPO_ROOT / "scripts" / "step43_repo_state_snapshot.py"
+STEP45_PATH = REPO_ROOT / "scripts" / "step45_team_status_snapshot.py"
 
 
 def utc_now_iso() -> str:
@@ -95,6 +96,20 @@ def load_snapshot_json() -> dict:
     return json.loads(completed.stdout)
 
 
+def load_team_status_json() -> dict:
+    completed = subprocess.run(
+        ["python3", str(STEP45_PATH)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"step45 team status command failed with code {completed.returncode}: {completed.stderr.strip()}"
+        )
+    return json.loads(completed.stdout)
+
+
 def format_bool(value: object) -> str:
     if isinstance(value, bool):
         return str(value).lower()
@@ -162,6 +177,46 @@ def format_health(snapshot: dict) -> str:
     )
 
 
+def format_teams(team_snapshot: dict) -> str:
+    teams = team_snapshot.get("teams", {})
+    lines = ["Kalshi Team Status"]
+    ordered = ["algorithms", "information_media", "deliberators", "executor", "budget_distributor"]
+    for name in ordered:
+        item = teams.get(name, {})
+        lines.append(f"- {name}: {item.get('status')} | {item.get('summary')}")
+    lines.append(f"Snapshot source: {team_snapshot.get('state_source')}")
+    lines.append(f"Snapshot ts: {team_snapshot.get('snapshot_ts')}")
+    return "\n".join(lines)
+
+
+def format_progress(team_snapshot: dict) -> str:
+    progress = team_snapshot.get("progress", {})
+    milestones = progress.get("milestones", []) or []
+    milestone_text = ", ".join(milestones) if milestones else "none"
+    return "\n".join(
+        [
+            "Kalshi Progress",
+            f"Phase: {progress.get('phase')}",
+            f"Summary: {progress.get('summary')}",
+            f"Milestones: {milestone_text}",
+            f"Snapshot ts: {team_snapshot.get('snapshot_ts')}",
+        ]
+    )
+
+
+def format_next_trade(team_snapshot: dict) -> str:
+    trade = team_snapshot.get("next_best_trade", {})
+    return "\n".join(
+        [
+            "Kalshi Next Trade",
+            f"Available: {format_bool(trade.get('available'))}",
+            f"Reason: {trade.get('reason')}",
+            f"Market ticker: {trade.get('market_ticker')}",
+            f"Confidence: {trade.get('confidence')}",
+        ]
+    )
+
+
 def extract_message(update: dict) -> tuple[int | None, str | None, int | None]:
     message = update.get("message") or update.get("edited_message")
     if not message:
@@ -187,16 +242,27 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
             continue
 
         normalized = text.strip().split()[0].lower()
-        if normalized not in {"/status", "/state", "/health", "/queue"}:
+        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade"}:
             continue
 
-        snapshot = load_snapshot_json()
         if normalized in {"/status", "/state"}:
+            snapshot = load_snapshot_json()
             response_text = format_status(snapshot)
         elif normalized == "/queue":
+            snapshot = load_snapshot_json()
             response_text = format_queue(snapshot)
-        else:
+        elif normalized == "/health":
+            snapshot = load_snapshot_json()
             response_text = format_health(snapshot)
+        elif normalized == "/teams":
+            team_snapshot = load_team_status_json()
+            response_text = format_teams(team_snapshot)
+        elif normalized == "/progress":
+            team_snapshot = load_team_status_json()
+            response_text = format_progress(team_snapshot)
+        else:
+            team_snapshot = load_team_status_json()
+            response_text = format_next_trade(team_snapshot)
 
         send_message(base_url, str(chat_id), response_text)
 

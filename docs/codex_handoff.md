@@ -61,5 +61,10 @@ For a lightweight control loop with Telegram status queries:
    - `/status` or `/state`: normalized control-plane snapshot
    - `/queue`: active/retired queue summary
    - `/health`: bot and snapshot freshness summary
+   - `/teams`: current team-by-team status snapshot
+   - `/progress`: development/control-plane rollout progress
+   - `/nexttrade`: current next-best-trade readiness summary
+4. Team status seed snapshot:
+   - `python3 scripts/step45_team_status_snapshot.py`
 
-`step44` does not place orders. It is read-only and answers `/status`, `/state`, `/queue`, and `/health` using the normalized snapshot from step43.
+`step44` does not place orders. It is read-only and answers `/status`, `/state`, `/queue`, `/health`, `/teams`, `/progress`, and `/nexttrade` using step43/step45 snapshots.
