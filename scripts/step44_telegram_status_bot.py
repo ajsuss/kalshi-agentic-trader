@@ -226,6 +226,13 @@ def refresh_process_running() -> bool:
     return True
 
 
+def clear_refresh_pid_marker() -> bool:
+    if refresh_process_running():
+        return False
+    STEP50_PID_PATH.unlink(missing_ok=True)
+    return True
+
+
 def start_refresh_and_decide_background() -> bool:
     if refresh_process_running():
         return False
@@ -519,7 +526,7 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
             continue
 
         normalized = text.strip().split()[0].lower()
-        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade", "/digest", "/cycle", "/brain", "/performance", "/refresh", "/refreshstatus"}:
+        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade", "/digest", "/cycle", "/brain", "/performance", "/refresh", "/refreshstatus", "/refreshreset"}:
             continue
 
         try:
@@ -561,6 +568,11 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
                     )
             elif normalized == "/refreshstatus":
                 response_text = format_refresh_status(load_latest_refresh_summary())
+            elif normalized == "/refreshreset":
+                if clear_refresh_pid_marker():
+                    response_text = "Refresh lock cleared. You can run /refresh again."
+                else:
+                    response_text = "Refresh is actively running; wait for /refreshstatus to complete."
             else:
                 team_snapshot = load_team_status_json()
                 response_text = format_next_trade(team_snapshot)
