@@ -93,6 +93,7 @@ def load_snapshot_json() -> dict:
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
+        timeout=30,
     )
     if completed.returncode != 0:
         raise RuntimeError(
@@ -107,6 +108,7 @@ def load_team_status_json() -> dict:
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
+        timeout=30,
     )
     if completed.returncode != 0:
         raise RuntimeError(
@@ -121,6 +123,7 @@ def load_digest_json() -> dict:
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
+        timeout=30,
     )
     if completed.returncode != 0:
         raise RuntimeError(
@@ -135,6 +138,7 @@ def run_deliberation_cycle_json() -> dict:
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
+        timeout=45,
     )
     if completed.returncode != 0:
         raise RuntimeError(
@@ -164,6 +168,7 @@ def load_performance_json() -> dict:
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
+        timeout=45,
     )
     if completed.returncode != 0:
         raise RuntimeError(
@@ -178,6 +183,7 @@ def run_refresh_and_decide_json() -> dict:
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
+        timeout=180,
     )
     if completed.returncode != 0:
         raise RuntimeError(
@@ -426,36 +432,44 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
         if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade", "/digest", "/cycle", "/brain", "/performance", "/refresh"}:
             continue
 
-        if normalized in {"/status", "/state"}:
-            snapshot = load_snapshot_json()
-            response_text = format_status(snapshot)
-        elif normalized == "/queue":
-            snapshot = load_snapshot_json()
-            response_text = format_queue(snapshot)
-        elif normalized == "/health":
-            snapshot = load_snapshot_json()
-            response_text = format_health(snapshot)
-        elif normalized == "/teams":
-            team_snapshot = load_team_status_json()
-            response_text = format_teams(team_snapshot)
-        elif normalized == "/progress":
-            team_snapshot = load_team_status_json()
-            response_text = format_progress(team_snapshot)
-        elif normalized == "/digest":
-            digest = load_digest_json()
-            response_text = format_digest(digest)
-        elif normalized == "/cycle":
-            cycle = run_deliberation_cycle_json()
-            response_text = format_cycle(cycle)
-        elif normalized == "/brain":
-            response_text = format_brain_status(load_latest_brain_iteration())
-        elif normalized == "/performance":
-            response_text = format_performance(load_performance_json())
-        elif normalized == "/refresh":
-            response_text = format_refresh(run_refresh_and_decide_json())
-        else:
-            team_snapshot = load_team_status_json()
-            response_text = format_next_trade(team_snapshot)
+        try:
+            if normalized in {"/status", "/state"}:
+                snapshot = load_snapshot_json()
+                response_text = format_status(snapshot)
+            elif normalized == "/queue":
+                snapshot = load_snapshot_json()
+                response_text = format_queue(snapshot)
+            elif normalized == "/health":
+                snapshot = load_snapshot_json()
+                response_text = format_health(snapshot)
+            elif normalized == "/teams":
+                team_snapshot = load_team_status_json()
+                response_text = format_teams(team_snapshot)
+            elif normalized == "/progress":
+                team_snapshot = load_team_status_json()
+                response_text = format_progress(team_snapshot)
+            elif normalized == "/digest":
+                digest = load_digest_json()
+                response_text = format_digest(digest)
+            elif normalized == "/cycle":
+                cycle = run_deliberation_cycle_json()
+                response_text = format_cycle(cycle)
+            elif normalized == "/brain":
+                response_text = format_brain_status(load_latest_brain_iteration())
+            elif normalized == "/performance":
+                response_text = format_performance(load_performance_json())
+            elif normalized == "/refresh":
+                response_text = format_refresh(run_refresh_and_decide_json())
+            else:
+                team_snapshot = load_team_status_json()
+                response_text = format_next_trade(team_snapshot)
+        except subprocess.TimeoutExpired:
+            response_text = (
+                f"Command {normalized} timed out.\n"
+                "Try again with a lighter command (/status, /digest), or rerun shortly."
+            )
+        except Exception as e:
+            response_text = f"Command {normalized} failed: {type(e).__name__}: {e}"
 
         send_message(base_url, str(chat_id), response_text)
 
