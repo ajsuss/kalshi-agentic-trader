@@ -201,11 +201,27 @@ def refresh_process_running() -> bool:
     try:
         pid = int(STEP50_PID_PATH.read_text(encoding="utf-8").strip())
     except Exception:
+        STEP50_PID_PATH.unlink(missing_ok=True)
+        return False
+
+    cmd = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        capture_output=True,
+        text=True,
+    )
+    if cmd.returncode != 0:
+        STEP50_PID_PATH.unlink(missing_ok=True)
+        return False
+
+    command_line = (cmd.stdout or "").strip()
+    if STEP50_PATH.name not in command_line:
+        STEP50_PID_PATH.unlink(missing_ok=True)
         return False
 
     try:
         os.kill(pid, 0)
     except OSError:
+        STEP50_PID_PATH.unlink(missing_ok=True)
         return False
     return True
 
