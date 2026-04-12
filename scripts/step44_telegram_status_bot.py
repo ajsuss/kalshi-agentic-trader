@@ -22,6 +22,7 @@ STEP46_PATH = REPO_ROOT / "scripts" / "step46_control_plane_digest.py"
 STEP47_PATH = REPO_ROOT / "scripts" / "step47_deliberation_cycle.py"
 STEP48_LOG_PATH = REPO_ROOT / "logs" / "step48" / "periodic_brain_loop.jsonl"
 STEP49_PATH = REPO_ROOT / "scripts" / "step49_performance_snapshot.py"
+STEP50_PATH = REPO_ROOT / "scripts" / "step50_refresh_and_decide.py"
 
 
 def utc_now_iso() -> str:
@@ -167,6 +168,20 @@ def load_performance_json() -> dict:
     if completed.returncode != 0:
         raise RuntimeError(
             f"step49 performance command failed with code {completed.returncode}: {completed.stderr.strip()}"
+        )
+    return json.loads(completed.stdout)
+
+
+def run_refresh_and_decide_json() -> dict:
+    completed = subprocess.run(
+        ["python3", str(STEP50_PATH)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"step50 refresh command failed with code {completed.returncode}: {completed.stderr.strip()}"
         )
     return json.loads(completed.stdout)
 
@@ -364,6 +379,25 @@ def format_performance(snapshot: dict) -> str:
     )
 
 
+def format_refresh(summary: dict) -> str:
+    runs = summary.get("runs", {})
+    ok_count = sum(1 for item in runs.values() if item.get("ok"))
+    total = len(runs)
+    failed = [name for name, item in runs.items() if not item.get("ok")]
+    failed_text = ", ".join(failed) if failed else "none"
+
+    return "\n".join(
+        [
+            "Kalshi Refresh + Decide",
+            f"Overall ok: {format_bool(summary.get('overall_ok'))}",
+            f"Candidate used: {summary.get('candidate_id_used')}",
+            f"Successful steps: {ok_count}/{total}",
+            f"Failed steps: {failed_text}",
+            f"Run ts: {summary.get('ts')}",
+        ]
+    )
+
+
 def extract_message(update: dict) -> tuple[int | None, str | None, int | None]:
     message = update.get("message") or update.get("edited_message")
     if not message:
@@ -389,7 +423,7 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
             continue
 
         normalized = text.strip().split()[0].lower()
-        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade", "/digest", "/cycle", "/brain", "/performance"}:
+        if normalized not in {"/status", "/state", "/health", "/queue", "/teams", "/progress", "/nexttrade", "/digest", "/cycle", "/brain", "/performance", "/refresh"}:
             continue
 
         if normalized in {"/status", "/state"}:
@@ -417,6 +451,8 @@ def handle_updates(base_url: str, configured_chat_id: str | None, updates: list[
             response_text = format_brain_status(load_latest_brain_iteration())
         elif normalized == "/performance":
             response_text = format_performance(load_performance_json())
+        elif normalized == "/refresh":
+            response_text = format_refresh(run_refresh_and_decide_json())
         else:
             team_snapshot = load_team_status_json()
             response_text = format_next_trade(team_snapshot)
