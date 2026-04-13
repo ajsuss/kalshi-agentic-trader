@@ -18,6 +18,7 @@ from app.execution.executor import Executor, TradeIntent
 from app.interfaces.telegram.router import TelegramCommandRouter
 from app.migration.legacy_compat import LegacyCompat
 from app.policies.risk_policy import RiskPolicy
+from app.policies.operator_preferences import OperatorPreferences, load_operator_preferences
 from app.state.manager import StateManager
 from app.kalshi_agentic.client_factory import make_read_client
 from app.kalshi_agentic.market_selection import fetch_event_by_ticker, fetch_market_by_ticker
@@ -99,6 +100,7 @@ class TelegramApp:
         self.compat = LegacyCompat(repo_root=REPO_ROOT)
         self.executor = Executor(policy=RiskPolicy())
         self.state = StateManager.from_repo_root(REPO_ROOT)
+        self.preferences = load_operator_preferences(REPO_ROOT)
         self._register_routes()
 
     def _register_routes(self) -> None:
@@ -115,6 +117,7 @@ class TelegramApp:
         self.router.register("/markets", "Read-only: top scanned markets.", self._handle_markets)
         self.router.register("/scan", "Read-only: alias for /markets.", self._handle_markets)
         self.router.register("/scanstatus", "Debug: scan diagnostics summary.", self._handle_scanstatus)
+        self.router.register("/why_nexttrade", "Debug: explain why top candidate won.", self._handle_why_nexttrade)
         self.router.register("/market", "Read-only: /market <MARKET_TICKER>", self._handle_market)
         self.router.register("/event", "Read-only: /event <EVENT_TICKER>", self._handle_event)
         self.router.register("/refresh", "Read-only: refresh candidates + recommendation.", self._handle_refresh)
@@ -130,7 +133,7 @@ class TelegramApp:
             "Account: /balance /positions /orders",
             "Markets: /markets (/scan) /market <TICKER> /event <EVENT_TICKER>",
             "Recommendation: /refresh /recommend /candidates /nexttrade /review ...",
-            "Diagnostics: /scanstatus",
+            "Diagnostics: /scanstatus /why_nexttrade",
             "Safety: live trading disabled by default; no live order route enabled.",
         ]
 
@@ -286,6 +289,107 @@ class TelegramApp:
                 return [item for item in value if isinstance(item, dict)]
         return []
 
+    def _hours_to_close(self, close_time: Any) -> float | None:
+        if not isinstance(close_time, str) or not close_time:
+            return None
+        try:
+            dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            return (dt - now).total_seconds() / 3600.0
+        except ValueError:
+            return None
+
+    def _evaluate_market_quality(self, market: dict[str, Any]) -> dict[str, Any]:
+        prefs: OperatorPreferences = self.preferences
+        ticker = str(market.get("ticker", ""))
+        title = str(market.get("title", ""))
+        status = market.get("status")
+        market_type = market.get("market_type")
+        yes_bid = _to_float(market.get("yes_bid_dollars"), default=0.0)
+        yes_ask = _to_float(market.get("yes_ask_dollars"), default=0.0)
+        no_bid = _to_float(market.get("no_bid_dollars"), default=0.0)
+        last_price = _to_float(market.get("last_price_dollars"), default=0.0)
+        volume = _to_float(market.get("volume_fp"), default=0.0)
+        open_interest = _to_float(market.get("open_interest_fp"), default=0.0)
+        close_hours = self._hours_to_close(market.get("close_time"))
+
+        lower_ticker = ticker.lower()
+        lower_title = title.lower()
+        composite_flag = any(p.lower() in lower_ticker for p in prefs.excluded_ticker_patterns) or any(
+            p.lower() in lower_title for p in prefs.excluded_title_patterns
+        )
+        long_title_flag = len(title) > prefs.max_title_length
+
+        quote_live = (0.0 < yes_ask < 1.0) and (0.0 <= yes_bid < yes_ask)
+        quote_quality = 0.0
+        spread = None
+        if quote_live:
+            spread = yes_ask - yes_bid
+            quote_quality = max(0.0, 1.0 - min(spread, 1.0))
+        elif 0.0 < yes_ask < 1.0 or 0.0 < no_bid < 1.0:
+            quote_quality = 0.2
+
+        history_signal = volume + open_interest
+        history_usable = (0.0 < last_price < 1.0) or (history_signal >= prefs.min_history_signal)
+        weak_history = history_signal < (prefs.min_volume + prefs.min_open_interest) and last_price == 0.0
+
+        score_parts: dict[str, float] = {
+            "base_active_binary": 40.0 if (status == "active" and market_type == "binary") else -100.0,
+            "quote_quality": quote_quality * 40.0,
+            "volume_quality": min(volume, 2000.0) / 80.0,
+            "open_interest_quality": min(open_interest, 2000.0) / 70.0,
+            "price_sanity": 10.0 if 0.0 < last_price < 1.0 else -5.0,
+        }
+        penalties: dict[str, float] = {}
+
+        if composite_flag:
+            penalties["composite_market"] = prefs.penalize_composite
+        if long_title_flag:
+            penalties["low_interpretability"] = prefs.penalize_low_interpretability
+        if quote_quality < prefs.min_quote_quality:
+            penalties["no_or_weak_live_quote"] = prefs.penalize_no_live_quote
+        if close_hours is not None and close_hours < prefs.min_close_hours:
+            penalties["too_close_to_expiry"] = prefs.penalize_too_close
+        if close_hours is not None and close_hours > prefs.max_close_hours:
+            penalties["too_far_to_expiry"] = prefs.penalize_too_far
+        if weak_history:
+            penalties["weak_history_signal"] = prefs.penalize_weak_signal
+
+        score = sum(score_parts.values()) - sum(penalties.values())
+
+        eligible = (
+            status == "active"
+            and market_type == "binary"
+            and history_usable
+            and (quote_quality >= prefs.min_quote_quality or history_signal >= (prefs.min_volume + prefs.min_open_interest))
+        )
+
+        reasons = []
+        if composite_flag:
+            reasons.append("composite/extended pattern")
+        if long_title_flag:
+            reasons.append("long/unreadable title")
+        if not history_usable:
+            reasons.append("no usable history signal")
+        if quote_quality < prefs.min_quote_quality:
+            reasons.append("weak quote quality")
+        if close_hours is not None and close_hours < prefs.min_close_hours:
+            reasons.append("too close to close time")
+
+        return {
+            "eligible": eligible,
+            "score": round(score, 4),
+            "score_parts": score_parts,
+            "penalties": penalties,
+            "quote_quality": round(quote_quality, 4),
+            "spread": spread,
+            "history_signal": round(history_signal, 2),
+            "composite_flag": composite_flag,
+            "long_title_flag": long_title_flag,
+            "close_hours": close_hours,
+            "reasons": reasons,
+        }
+
     def _handle_positions(self, _: list[str]) -> str:
         payload, error, path = self._auth_get_first_ok([
             "/trade-api/v2/portfolio/positions",
@@ -377,70 +481,47 @@ class TelegramApp:
             rejection_reasons: Counter[str] = Counter()
 
             for market in by_ticker.values():
-                status = market.get("status")
-                market_type = market.get("market_type")
-                yes_ask = _to_float(market.get("yes_ask_dollars"), default=0.0)
-                no_bid = _to_float(market.get("no_bid_dollars"), default=0.0)
-                last_price = _to_float(market.get("last_price_dollars"), default=0.0)
-                volume = _to_float(market.get("volume_fp"), default=0.0)
-                open_interest = _to_float(market.get("open_interest_fp"), default=0.0)
-
-                if status == "active":
+                if market.get("status") == "active":
                     diag_counter["active_markets"] += 1
                 else:
                     rejection_reasons["non_active_status"] += 1
                     continue
 
-                if market_type == "binary":
+                if market.get("market_type") == "binary":
                     diag_counter["binary_markets"] += 1
                 else:
                     rejection_reasons["non_binary_market"] += 1
                     continue
 
-                quote_usable = (0.0 < yes_ask < 1.0) or (0.0 < no_bid < 1.0)
-                history_usable = (0.0 < last_price < 1.0) or (volume > 0.0) or (open_interest > 0.0)
-
-                if quote_usable:
+                quality = self._evaluate_market_quality(market)
+                if quality["quote_quality"] >= self.preferences.min_quote_quality:
                     diag_counter["quote_usable"] += 1
-                else:
-                    rejection_reasons["no_live_quote"] += 1
-
-                if history_usable:
+                if quality["history_signal"] >= self.preferences.min_history_signal:
                     diag_counter["history_usable"] += 1
-                else:
-                    rejection_reasons["no_trade_history"] += 1
 
-                if not quote_usable and not history_usable:
+                if not quality["eligible"]:
+                    for reason in quality["reasons"]:
+                        rejection_reasons[reason] += 1
                     continue
 
-                score = 0.0
-                score += 30.0 if quote_usable else 5.0
-                score += min(volume, 5000.0) / 50.0
-                score += min(open_interest, 5000.0) / 40.0
-                if 0.0 < last_price < 1.0:
-                    score += 10.0
-                    score += max(0.0, 20.0 - abs(0.5 - last_price) * 40.0)
-
-                rationale_bits = []
-                if quote_usable:
-                    rationale_bits.append("live_quote")
-                if volume > 0:
-                    rationale_bits.append(f"volume={_fmt_num(volume)}")
-                if open_interest > 0:
-                    rationale_bits.append(f"oi={_fmt_num(open_interest)}")
-                if 0.0 < last_price < 1.0:
-                    rationale_bits.append(f"last={_fmt_money(last_price)}")
-
                 ranked = dict(market)
-                ranked["scan_score"] = round(score, 4)
-                ranked["scan_rationale"] = ", ".join(rationale_bits) if rationale_bits else "fallback"
+                ranked["scan_score"] = quality["score"]
+                ranked["scan_score_parts"] = quality["score_parts"]
+                ranked["scan_penalties"] = quality["penalties"]
+                ranked["scan_quote_quality"] = quality["quote_quality"]
+                ranked["scan_close_hours"] = quality["close_hours"]
+                ranked["scan_composite_flag"] = quality["composite_flag"]
+                ranked["scan_rationale"] = (
+                    f"quote_q={quality['quote_quality']:.2f}, history={quality['history_signal']:.1f}, "
+                    f"penalties={','.join(quality['penalties'].keys()) or 'none'}"
+                )
                 candidates.append(ranked)
 
             candidates.sort(
                 key=lambda item: (
                     item.get("scan_score", 0.0),
+                    item.get("scan_quote_quality", 0.0),
                     _to_float(item.get("open_interest_fp")),
-                    _to_float(item.get("volume_fp")),
                 ),
                 reverse=True,
             )
@@ -456,6 +537,12 @@ class TelegramApp:
                 "history_usable": diag_counter["history_usable"],
                 "final_candidate_count": len(candidates),
                 "top_rejections": rejection_reasons.most_common(3),
+                "preference_summary": {
+                    "min_quote_quality": self.preferences.min_quote_quality,
+                    "min_close_hours": self.preferences.min_close_hours,
+                    "max_close_hours": self.preferences.max_close_hours,
+                    "min_recommendation_score": self.preferences.min_recommendation_score,
+                },
             }
             return candidates[:12], diagnostics, None
         except Exception as exc:  # noqa: BLE001
@@ -483,10 +570,13 @@ class TelegramApp:
         return self.state.read_json("runtime/recommendation_state.json", default={})
 
     def _format_candidate_line(self, c: dict[str, Any], idx: int) -> str:
+        penalties = c.get("scan_penalties", {})
+        penalty_names = ",".join(penalties.keys()) if isinstance(penalties, dict) and penalties else "none"
         return (
             f"{idx}. {c.get('ticker', 'n/a')} | score={_fmt_num(c.get('scan_score'))} | "
-            f"last={_fmt_money(c.get('last_price_dollars'))} | "
-            f"vol={_fmt_num(c.get('volume_fp'))} | oi={_fmt_num(c.get('open_interest_fp'))}"
+            f"quote_q={_fmt_num(c.get('scan_quote_quality'))} | "
+            f"last={_fmt_money(c.get('last_price_dollars'))} | close_h={_fmt_num(c.get('scan_close_hours'))} | "
+            f"penalties={penalty_names}"
         )
 
     def _handle_markets(self, _: list[str]) -> str:
@@ -500,7 +590,10 @@ class TelegramApp:
             "📈 Top Markets",
             f"Candidates: {len(candidates)} | Fetched: {diagnostics.get('markets_fetched', 'n/a')} | Pages: {diagnostics.get('pages_scanned', 'n/a')}",
         ]
-        lines.extend(self._format_candidate_line(c, idx + 1) for idx, c in enumerate(candidates[:8]))
+        for idx, c in enumerate(candidates[:8]):
+            lines.append(self._format_candidate_line(c, idx + 1))
+            lines.append(f"   ↳ {c.get('title', 'n/a')}")
+            lines.append(f"   ↳ why: {c.get('scan_rationale', 'n/a')}")
         return "\n".join(lines)
 
     def _handle_scanstatus(self, _: list[str]) -> str:
@@ -521,6 +614,9 @@ class TelegramApp:
                 f"History-usable: {diagnostics.get('history_usable', 0)}",
                 f"Final candidates: {diagnostics.get('final_candidate_count', len(candidates))}",
                 f"Top rejection reasons: {rej_text}",
+                f"Prefs: min_quote={diagnostics.get('preference_summary', {}).get('min_quote_quality', 'n/a')}, "
+                f"close_hours=[{diagnostics.get('preference_summary', {}).get('min_close_hours', 'n/a')},"
+                f"{diagnostics.get('preference_summary', {}).get('max_close_hours', 'n/a')}]",
             ]
         )
 
@@ -536,15 +632,25 @@ class TelegramApp:
         try:
             market_payload = fetch_market_by_ticker(client, ticker)
             market = market_payload.get("market", market_payload)
+            quality = self._evaluate_market_quality(market if isinstance(market, dict) else {})
+            score_parts = quality.get("score_parts", {})
+            penalties = quality.get("penalties", {})
             return "\n".join(
                 [
                     f"🔎 Market {market.get('ticker', ticker)}",
                     f"Title: {market.get('title', 'n/a')}",
+                    f"Event: {market.get('event_ticker', 'n/a')}",
                     f"Status: {market.get('status', 'n/a')}",
+                    f"Market type: {market.get('market_type', 'n/a')}",
                     f"YES bid/ask: {_fmt_money(market.get('yes_bid_dollars'))} / {_fmt_money(market.get('yes_ask_dollars'))}",
                     f"NO bid/ask: {_fmt_money(market.get('no_bid_dollars'))} / {_fmt_money(market.get('no_ask_dollars'))}",
                     f"Last: {_fmt_money(market.get('last_price_dollars'))}",
                     f"Volume: {_fmt_num(market.get('volume_fp'))} | OI: {_fmt_num(market.get('open_interest_fp'))}",
+                    f"Close time: {market.get('close_time', 'n/a')} (hours_to_close={_fmt_num(quality.get('close_hours'))})",
+                    f"Composite flag: {quality.get('composite_flag')} | Eligible: {quality.get('eligible')}",
+                    f"Score: {_fmt_num(quality.get('score'))}",
+                    f"Score parts: {', '.join(f'{k}={v:.1f}' for k, v in score_parts.items())}",
+                    f"Penalties: {', '.join(f'{k}={v:.1f}' for k, v in penalties.items()) if penalties else 'none'}",
                 ]
             )
         except Exception as exc:  # noqa: BLE001
@@ -590,6 +696,14 @@ class TelegramApp:
             return None, [], diagnostics, "No candidates available from current scan."
 
         top = candidates[0]
+        if _to_float(top.get("scan_score")) < self.preferences.min_recommendation_score:
+            self._persist_candidates(candidates, None, diagnostics)
+            return (
+                None,
+                candidates,
+                diagnostics,
+                f"Top candidate below quality threshold ({_fmt_num(top.get('scan_score'))} < {self.preferences.min_recommendation_score})",
+            )
         quoted = _to_float(top.get("yes_ask_dollars"), default=0.0)
         last = _to_float(top.get("last_price_dollars"), default=0.5)
         chosen_price = quoted if 0.0 < quoted < 1.0 else min(0.95, max(0.05, last))
@@ -660,6 +774,26 @@ class TelegramApp:
 
         lines = ["🗂️ Top Cached Candidates (3):"]
         lines.extend(self._format_candidate_line(c, idx + 1) for idx, c in enumerate(candidates[:3]))
+        return "\n".join(lines)
+
+    def _handle_why_nexttrade(self, _: list[str]) -> str:
+        cached = self._load_cached_recommendation()
+        candidates = cached.get("candidates") or []
+        recommendation = cached.get("recommendation")
+        if not candidates:
+            return "🧠 Why Next Trade\nNo cached candidates. Run /refresh first."
+
+        lines = ["🧠 Why Next Trade (top 3 comparison)"]
+        for idx, c in enumerate(candidates[:3]):
+            label = "WINNER" if isinstance(recommendation, dict) and c.get("ticker") == recommendation.get("market_ticker") else f"#{idx+1}"
+            penalties = c.get("scan_penalties", {})
+            penalty_text = ", ".join(f"{k}:{v:.1f}" for k, v in penalties.items()) if penalties else "none"
+            lines.append(
+                f"{label} {c.get('ticker')} score={_fmt_num(c.get('scan_score'))} "
+                f"quote_q={_fmt_num(c.get('scan_quote_quality'))} close_h={_fmt_num(c.get('scan_close_hours'))}"
+            )
+            lines.append(f"   why: {c.get('scan_rationale', 'n/a')}")
+            lines.append(f"   penalties: {penalty_text}")
         return "\n".join(lines)
 
     def _handle_nexttrade(self, _: list[str]) -> str:

@@ -73,3 +73,45 @@ def test_recommend_generates_message(monkeypatch):
     text = app.router.dispatch("/recommend")
     assert "Dry-Run Recommendation" in text
     assert "TEST-1" in text
+
+
+def test_why_nexttrade_explains_winner(monkeypatch):
+    app = _app(monkeypatch)
+
+    def fake_scan():
+        return [
+            {
+                "ticker": "TEST-1",
+                "title": "Test Market 1",
+                "event_ticker": "EVT-1",
+                "scan_score": 88.2,
+                "scan_rationale": "strong quote",
+                "scan_quote_quality": 0.9,
+                "scan_close_hours": 12,
+                "scan_penalties": {},
+                "yes_ask_dollars": 0.52,
+                "last_price_dollars": 0.50,
+                "volume_fp": 10,
+                "open_interest_fp": 12,
+            },
+            {
+                "ticker": "TEST-2",
+                "title": "Test Market 2",
+                "event_ticker": "EVT-2",
+                "scan_score": 50.0,
+                "scan_rationale": "weak quote",
+                "scan_quote_quality": 0.2,
+                "scan_close_hours": 8,
+                "scan_penalties": {"no_or_weak_live_quote": 15.0},
+                "yes_ask_dollars": 0.0,
+                "last_price_dollars": 0.40,
+                "volume_fp": 8,
+                "open_interest_fp": 7,
+            },
+        ], {"markets_fetched": 2, "pages_scanned": 1, "final_candidate_count": 2}, None
+
+    app._fetch_markets_with_diagnostics = fake_scan  # type: ignore[method-assign]
+    app.router.dispatch("/recommend")
+    text = app.router.dispatch("/why_nexttrade")
+    assert "Why Next Trade" in text
+    assert "WINNER TEST-1" in text
