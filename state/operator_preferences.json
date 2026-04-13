@@ -1,0 +1,35 @@
+{
+  "excluded_ticker_patterns": [
+    "XMVESPORTSMULTIGAME",
+    "XMVECROSSCATEGORY",
+    "MULTIGAME",
+    "CROSSCATEGORY",
+    "PARLAY",
+    "BUNDLE",
+    "COMPOSITE",
+    "EXTENDED"
+  ],
+  "excluded_title_patterns": [
+    "multi-game",
+    "cross-category",
+    "parlay",
+    "bundle",
+    "extended",
+    "combination"
+  ],
+  "max_title_length": 140,
+  "min_close_hours": 2.0,
+  "max_close_hours": 504.0,
+  "min_open_interest": 5.0,
+  "min_volume": 5.0,
+  "min_quote_quality": 0.2,
+  "min_recommendation_score": 15.0,
+  "require_live_quote_for_recommendation": true,
+  "exclude_composite_for_recommendation": true,
+  "strict_scan_exclude_composite": true,
+  "strict_scan_max_title_length": 120,
+  "strict_scan_require_interpretable_title": true,
+  "strict_scan_preferred_categories": [],
+  "strict_scan_excluded_categories": [],
+  "default_scan_mode": "strict"
+}
