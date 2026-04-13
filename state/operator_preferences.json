@@ -1,0 +1,27 @@
+{
+  "excluded_ticker_patterns": [
+    "XMVESPORTSMULTIGAME",
+    "XMVECROSSCATEGORY",
+    "MULTIGAME",
+    "CROSSCATEGORY",
+    "PARLAY",
+    "BUNDLE",
+    "COMPOSITE",
+    "EXTENDED"
+  ],
+  "excluded_title_patterns": [
+    "multi-game",
+    "cross-category",
+    "parlay",
+    "bundle",
+    "extended",
+    "combination"
+  ],
+  "max_title_length": 140,
+  "min_close_hours": 2.0,
+  "max_close_hours": 504.0,
+  "min_open_interest": 5.0,
+  "min_volume": 5.0,
+  "min_quote_quality": 0.2,
+  "min_recommendation_score": 15.0
+}
