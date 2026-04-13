@@ -55,7 +55,11 @@ python -m app.interfaces.telegram.main
 2. `/status` (control-plane snapshot)
 3. `/team` (team status agent output)
 4. `/digest` (high-level digest)
-5. `/review <TICKER> YES 1 0.50` (executor dry-run policy review)
+5. `/markets` (live read-only top candidates)
+6. `/market <TICKER>`
+7. `/event <EVENT_TICKER>`
+8. `/recommend`
+9. `/review <TICKER> YES 1 0.50` (executor dry-run policy review)
 
 ## 6) Stop cleanly
 - Press `Ctrl+C` in the terminal running `run_telegram_app.sh`, or run:

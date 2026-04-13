@@ -3,28 +3,34 @@ from __future__ import annotations
 from app.interfaces.telegram.main import TelegramApp, TelegramRuntimeConfig
 
 
-def test_help_command_includes_read_only_text(monkeypatch):
+def _app(monkeypatch):
     monkeypatch.setenv("EXECUTION_MODE", "dry_run")
     monkeypatch.setenv("KALSHI_LIVE_TRADING_ARMED", "0")
+    return TelegramApp(config=TelegramRuntimeConfig(bot_token="dummy", chat_id="123"), poll_timeout=1)
 
-    app = TelegramApp(
-        config=TelegramRuntimeConfig(bot_token="dummy", chat_id="123"),
-        poll_timeout=1,
-    )
 
+def test_help_command_includes_operator_sections(monkeypatch):
+    app = _app(monkeypatch)
     text = app.router.dispatch("/help")
-    assert "/status" in text
-    assert "Safety" in text
+    assert "Kalshi Dry-Run Operator Bot" in text
+    assert "/markets" in text
 
 
-def test_review_command_is_policy_blocked_by_default(monkeypatch):
-    monkeypatch.setenv("EXECUTION_MODE", "dry_run")
-    monkeypatch.setenv("KALSHI_LIVE_TRADING_ARMED", "0")
+def test_policy_command_is_human_readable(monkeypatch):
+    app = _app(monkeypatch)
+    text = app.router.dispatch("/policy")
+    assert "Policy Check" in text
+    assert "Approved: False" in text
 
-    app = TelegramApp(
-        config=TelegramRuntimeConfig(bot_token="dummy", chat_id="123"),
-        poll_timeout=1,
-    )
 
+def test_review_command_is_operator_readable(monkeypatch):
+    app = _app(monkeypatch)
     text = app.router.dispatch("/review TEST YES 1 0.50")
-    assert "blocked_by_policy" in text
+    assert "Review Result" in text
+    assert "Outcome: BLOCKED" in text
+
+
+def test_candidates_command_requires_refresh_first(monkeypatch):
+    app = _app(monkeypatch)
+    text = app.router.dispatch("/candidates")
+    assert "Run /refresh or /recommend first" in text
