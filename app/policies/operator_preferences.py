@@ -46,6 +46,12 @@ class OperatorPreferences:
     min_recommendation_score: float = 15.0
     require_live_quote_for_recommendation: bool = True
     exclude_composite_for_recommendation: bool = True
+    strict_scan_exclude_composite: bool = True
+    strict_scan_max_title_length: int = 120
+    strict_scan_require_interpretable_title: bool = True
+    strict_scan_preferred_categories: list[str] = field(default_factory=list)
+    strict_scan_excluded_categories: list[str] = field(default_factory=list)
+    default_scan_mode: str = "strict"
 
 
 def load_operator_preferences(repo_root: Path) -> OperatorPreferences:

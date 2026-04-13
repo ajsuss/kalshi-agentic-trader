@@ -33,7 +33,7 @@ def test_review_command_is_operator_readable(monkeypatch):
 def test_scanstatus_format(monkeypatch):
     app = _app(monkeypatch)
 
-    def fake_scan():
+    def fake_scan(mode, pages=6, limit_per_page=100):
         return [], {
             "markets_fetched": 100,
             "pages_scanned": 2,
@@ -43,12 +43,27 @@ def test_scanstatus_format(monkeypatch):
             "history_usable": 22,
             "final_candidate_count": 5,
             "top_rejections": [("no_live_quote", 70)],
+            "rejection_counts": {},
+            "scan_mode": "strict",
+            "preference_summary": {"min_quote_quality": 0.2, "min_close_hours": 2, "max_close_hours": 100},
         }, None
 
-    app._fetch_markets_with_diagnostics = fake_scan  # type: ignore[method-assign]
+    app._fetch_markets_with_diagnostics_mode = fake_scan  # type: ignore[method-assign]
     text = app.router.dispatch("/scanstatus")
     assert "Scan Diagnostics" in text
     assert "markets fetched".lower() in text.lower()
+
+
+def test_scan_debug_uses_broad_mode(monkeypatch):
+    app = _app(monkeypatch)
+
+    def fake_scan_mode(mode, pages=6, limit_per_page=100):
+        assert mode == "broad"
+        return [], {"markets_fetched": 0, "pages_scanned": 0, "scan_mode": "broad", "rejection_counts": {}, "preference_summary": {}}, None
+
+    app._fetch_markets_with_diagnostics_mode = fake_scan_mode  # type: ignore[method-assign]
+    text = app.router.dispatch("/scan_debug")
+    assert "Market Scan" in text
 
 
 def test_recommend_generates_message(monkeypatch):

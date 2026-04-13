@@ -118,7 +118,9 @@ class TelegramApp:
         self.router.register("/orders", "Read-only: orders.", self._handle_orders)
         self.router.register("/markets", "Read-only: top scanned markets.", self._handle_markets)
         self.router.register("/scan", "Read-only: alias for /markets.", self._handle_markets)
+        self.router.register("/scan_debug", "Debug: broad scan mode.", self._handle_scan_debug)
         self.router.register("/scanstatus", "Debug: scan diagnostics summary.", self._handle_scanstatus)
+        self.router.register("/scanprefs", "Debug: universe and gate preferences.", self._handle_scanprefs)
         self.router.register("/why_nexttrade", "Debug: explain why top candidate won.", self._handle_why_nexttrade)
         self.router.register("/market", "Read-only: /market <MARKET_TICKER>", self._handle_market)
         self.router.register("/event", "Read-only: /event <EVENT_TICKER>", self._handle_event)
@@ -135,7 +137,7 @@ class TelegramApp:
             "Account: /balance /positions /orders",
             "Markets: /markets (/scan) /market <TICKER> /event <EVENT_TICKER>",
             "Recommendation: /refresh /recommend /candidates /nexttrade /review ...",
-            "Diagnostics: /scanstatus /why_nexttrade",
+            "Diagnostics: /scanstatus [/scanstatus broad] /scan_debug /scanprefs /why_nexttrade",
             "Safety: live trading disabled by default; no live order route enabled.",
         ]
 
@@ -463,7 +465,7 @@ class TelegramApp:
                 pass
 
             attempts.append("recent_scan_substring_search")
-            top, _, _ = self._fetch_markets_with_diagnostics(pages=3, limit_per_page=80)
+            top, _, _ = self._fetch_markets_with_diagnostics_mode(mode="broad", pages=3, limit_per_page=80)
             if top:
                 normalized = re.sub(r"[^A-Z0-9]", "", ident)
                 for market in top:
@@ -484,6 +486,57 @@ class TelegramApp:
             client.close()
 
         return {"identifier": ident, "attempts": attempts, "kind": "unknown", "cached_matches": cached_matches}
+
+    def _expand_event_children(self, event_identifier: str, event_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+        direct = event_payload.get("markets") if isinstance(event_payload.get("markets"), list) else []
+        if direct:
+            return [m for m in direct if isinstance(m, dict)], "event_nested_markets"
+
+        client, error = self._with_read_client()
+        if client is None:
+            return [], f"no_read_client:{error}"
+        try:
+            attempts = [
+                {"event_ticker": event_identifier, "limit": 100},
+                {"series_ticker": event_payload.get("series_ticker"), "limit": 100},
+            ]
+            for params in attempts:
+                params = {k: v for k, v in params.items() if v}
+                if not params:
+                    continue
+                try:
+                    payload = client.public_get("/trade-api/v2/markets", params=params).json()
+                    markets = payload.get("markets") if isinstance(payload.get("markets"), list) else []
+                    if markets:
+                        filtered = []
+                        for m in markets:
+                            if not isinstance(m, dict):
+                                continue
+                            if m.get("event_ticker") == event_identifier or not event_identifier:
+                                filtered.append(m)
+                        return (filtered or markets), f"markets_endpoint_query:{params}"
+                except Exception:
+                    continue
+        finally:
+            client.close()
+
+        # broad scan inference fallback
+        inferred, _, _ = self._fetch_markets_with_diagnostics_mode(mode="broad", pages=4, limit_per_page=120)
+        slug_key = re.sub(r"[^A-Z0-9]", "", event_identifier.upper())
+        matches: list[dict[str, Any]] = []
+        for m in inferred:
+            if not isinstance(m, dict):
+                continue
+            blob = re.sub(
+                r"[^A-Z0-9]",
+                "",
+                f"{m.get('event_ticker', '')} {m.get('ticker', '')} {m.get('title', '')}".upper(),
+            )
+            if slug_key and slug_key in blob:
+                matches.append(m)
+        if matches:
+            return matches[:20], "broad_scan_inference"
+        return [], "no_children_found"
 
     def _handle_positions(self, _: list[str]) -> str:
         payload, error, path = self._auth_get_first_ok([
@@ -541,6 +594,10 @@ class TelegramApp:
         return "\n".join(lines)
 
     def _fetch_markets_with_diagnostics(self, pages: int = 6, limit_per_page: int = 100) -> tuple[list[dict[str, Any]], dict[str, Any], str | None]:
+        return self._fetch_markets_with_diagnostics_mode(mode=self.preferences.default_scan_mode, pages=pages, limit_per_page=limit_per_page)
+
+    def _fetch_markets_with_diagnostics_mode(self, mode: str, pages: int = 6, limit_per_page: int = 100) -> tuple[list[dict[str, Any]], dict[str, Any], str | None]:
+        scan_mode = (mode or "strict").lower()
         client, error = self._with_read_client()
         if client is None:
             return [], {}, f"Read-client unavailable: {error}"
@@ -594,6 +651,21 @@ class TelegramApp:
                 if quality["history_signal"] >= self.preferences.min_history_signal:
                     diag_counter["history_usable"] += 1
 
+                category = str(market.get("category", "")).lower()
+                if scan_mode == "strict":
+                    if self.preferences.strict_scan_exclude_composite and quality["composite_flag"]:
+                        rejection_reasons["strict_universe_composite_excluded"] += 1
+                        continue
+                    if self.preferences.strict_scan_require_interpretable_title and quality["long_title_flag"]:
+                        rejection_reasons["strict_universe_unreadable_title"] += 1
+                        continue
+                    if self.preferences.strict_scan_preferred_categories and category not in [c.lower() for c in self.preferences.strict_scan_preferred_categories]:
+                        rejection_reasons["strict_universe_non_preferred_category"] += 1
+                        continue
+                    if self.preferences.strict_scan_excluded_categories and category in [c.lower() for c in self.preferences.strict_scan_excluded_categories]:
+                        rejection_reasons["strict_universe_excluded_category"] += 1
+                        continue
+
                 if not quality["eligible"]:
                     for reason in quality["reasons"]:
                         rejection_reasons[reason] += 1
@@ -632,11 +704,15 @@ class TelegramApp:
                 "history_usable": diag_counter["history_usable"],
                 "final_candidate_count": len(candidates),
                 "top_rejections": rejection_reasons.most_common(3),
+                "rejection_counts": dict(rejection_reasons),
+                "scan_mode": scan_mode,
                 "preference_summary": {
                     "min_quote_quality": self.preferences.min_quote_quality,
                     "min_close_hours": self.preferences.min_close_hours,
                     "max_close_hours": self.preferences.max_close_hours,
                     "min_recommendation_score": self.preferences.min_recommendation_score,
+                    "strict_scan_exclude_composite": self.preferences.strict_scan_exclude_composite,
+                    "strict_scan_require_interpretable_title": self.preferences.strict_scan_require_interpretable_title,
                 },
             }
             return candidates[:12], diagnostics, None
@@ -674,8 +750,14 @@ class TelegramApp:
             f"penalties={penalty_names}"
         )
 
-    def _handle_markets(self, _: list[str]) -> str:
-        candidates, diagnostics, error = self._fetch_markets_with_diagnostics()
+    def _parse_scan_mode(self, args: list[str]) -> str:
+        if args and args[0].lower() in {"broad", "debug"}:
+            return "broad"
+        return self.preferences.default_scan_mode
+
+    def _handle_markets(self, args: list[str]) -> str:
+        mode = self._parse_scan_mode(args)
+        candidates, diagnostics, error = self._fetch_markets_with_diagnostics_mode(mode=mode)
         if error:
             return f"📈 Market Scan\nUnavailable ({error})."
         if not candidates:
@@ -683,7 +765,7 @@ class TelegramApp:
 
         lines = [
             "📈 Top Markets",
-            f"Candidates: {len(candidates)} | Fetched: {diagnostics.get('markets_fetched', 'n/a')} | Pages: {diagnostics.get('pages_scanned', 'n/a')}",
+            f"Mode: {diagnostics.get('scan_mode', mode)} | Candidates: {len(candidates)} | Fetched: {diagnostics.get('markets_fetched', 'n/a')} | Pages: {diagnostics.get('pages_scanned', 'n/a')}",
         ]
         for idx, c in enumerate(candidates[:8]):
             lines.append(self._format_candidate_line(c, idx + 1))
@@ -691,16 +773,39 @@ class TelegramApp:
             lines.append(f"   ↳ why: {c.get('scan_rationale', 'n/a')}")
         return "\n".join(lines)
 
-    def _handle_scanstatus(self, _: list[str]) -> str:
-        candidates, diagnostics, error = self._fetch_markets_with_diagnostics()
+    def _handle_scan_debug(self, _: list[str]) -> str:
+        return self._handle_markets(["broad"])
+
+    def _handle_scanprefs(self, _: list[str]) -> str:
+        return "\n".join(
+            [
+                "🧭 Universe Preferences",
+                f"default_scan_mode: {self.preferences.default_scan_mode}",
+                f"strict_scan_exclude_composite: {self.preferences.strict_scan_exclude_composite}",
+                f"strict_scan_require_interpretable_title: {self.preferences.strict_scan_require_interpretable_title}",
+                f"strict_scan_max_title_length: {self.preferences.strict_scan_max_title_length}",
+                f"strict_scan_preferred_categories: {self.preferences.strict_scan_preferred_categories or ['none']}",
+                f"strict_scan_excluded_categories: {self.preferences.strict_scan_excluded_categories or ['none']}",
+                f"min_quote_quality: {self.preferences.min_quote_quality}",
+                f"recommendation gate: min_score={self.preferences.min_recommendation_score}, "
+                f"require_live_quote={self.preferences.require_live_quote_for_recommendation}, "
+                f"exclude_composite={self.preferences.exclude_composite_for_recommendation}",
+            ]
+        )
+
+    def _handle_scanstatus(self, args: list[str]) -> str:
+        mode = self._parse_scan_mode(args)
+        candidates, diagnostics, error = self._fetch_markets_with_diagnostics_mode(mode=mode)
         if error:
             return f"🩺 Scan Diagnostics\nFailed ({error})."
 
         top_rej = diagnostics.get("top_rejections", [])
         rej_text = ", ".join(f"{name}:{count}" for name, count in top_rej) if top_rej else "none"
+        rej = diagnostics.get("rejection_counts", {})
         return "\n".join(
             [
                 "🩺 Scan Diagnostics",
+                f"Scan mode: {diagnostics.get('scan_mode', mode)}",
                 f"Markets fetched: {diagnostics.get('markets_fetched', 0)}",
                 f"Pages scanned: {diagnostics.get('pages_scanned', 0)}",
                 f"Active markets: {diagnostics.get('active_markets', 0)}",
@@ -709,6 +814,10 @@ class TelegramApp:
                 f"History-usable: {diagnostics.get('history_usable', 0)}",
                 f"Final candidates: {diagnostics.get('final_candidate_count', len(candidates))}",
                 f"Top rejection reasons: {rej_text}",
+                f"Excluded by universe: {rej.get('strict_universe_composite_excluded', 0) + rej.get('strict_universe_unreadable_title', 0) + rej.get('strict_universe_non_preferred_category', 0) + rej.get('strict_universe_excluded_category', 0)}",
+                f"Excluded by composite flag: {rej.get('composite/extended pattern', 0) + rej.get('strict_universe_composite_excluded', 0)}",
+                f"Excluded by weak quote: {rej.get('weak quote quality', 0)}",
+                f"Excluded by close-time filter: {rej.get('too close to close time', 0)}",
                 f"Prefs: min_quote={diagnostics.get('preference_summary', {}).get('min_quote_quality', 'n/a')}, "
                 f"close_hours=[{diagnostics.get('preference_summary', {}).get('min_close_hours', 'n/a')},"
                 f"{diagnostics.get('preference_summary', {}).get('max_close_hours', 'n/a')}]",
@@ -745,11 +854,17 @@ class TelegramApp:
 
         if resolved.get("kind") == "event":
             event = resolved.get("event", {})
-            markets = resolved.get("markets", []) if isinstance(resolved.get("markets"), list) else []
+            markets, source = self._expand_event_children(
+                str(event.get("event_ticker", event.get("ticker", resolved.get("identifier", "")))),
+                {"markets": resolved.get("markets", []), **(event if isinstance(event, dict) else {})},
+            )
             lines = [
                 f"ℹ️ '{resolved.get('identifier')}' appears to be an event-like identifier, not a direct market ticker.",
                 f"Event: {event.get('event_ticker', event.get('ticker', 'n/a'))}",
                 f"Title: {event.get('title', 'n/a')}",
+                f"Event status: {event.get('status', event.get('event_status', 'n/a'))}",
+                f"Event close: {event.get('close_time', event.get('expiration_time', 'n/a'))}",
+                f"Child source: {source}",
                 "Use /event <IDENTIFIER> for event view, or pick a child market ticker below:",
             ]
             for m in markets[:6]:
@@ -774,13 +889,16 @@ class TelegramApp:
 
         if resolved.get("kind") == "event":
             event = resolved.get("event", {})
-            markets = resolved.get("markets", []) if isinstance(resolved.get("markets"), list) else []
+            markets, source = self._expand_event_children(
+                str(event.get("event_ticker", event.get("ticker", resolved.get("identifier", "")))),
+                {"markets": resolved.get("markets", []), **(event if isinstance(event, dict) else {})},
+            )
             lines = [
                 f"🗂️ Event {event.get('event_ticker', event.get('ticker', resolved.get('identifier', 'n/a')))}",
                 f"Title: {event.get('title', 'n/a')}",
-                f"Status: {event.get('status', 'n/a')}",
+                f"Status: {event.get('status', event.get('event_status', 'n/a'))}",
                 f"Close time: {event.get('close_time', event.get('expiration_time', 'n/a'))}",
-                f"Child markets: {len(markets)}",
+                f"Child markets: {len(markets)} (source={source})",
                 "Use these tickers with /market or /review:",
             ]
             for m in markets[:8]:

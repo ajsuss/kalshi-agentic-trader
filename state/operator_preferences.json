@@ -25,5 +25,11 @@
   "min_quote_quality": 0.2,
   "min_recommendation_score": 15.0,
   "require_live_quote_for_recommendation": true,
-  "exclude_composite_for_recommendation": true
+  "exclude_composite_for_recommendation": true,
+  "strict_scan_exclude_composite": true,
+  "strict_scan_max_title_length": 120,
+  "strict_scan_require_interpretable_title": true,
+  "strict_scan_preferred_categories": [],
+  "strict_scan_excluded_categories": [],
+  "default_scan_mode": "strict"
 }
