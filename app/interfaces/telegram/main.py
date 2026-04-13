@@ -124,6 +124,8 @@ class TelegramApp:
         self.router.register("/why_nexttrade", "Debug: explain why top candidate won.", self._handle_why_nexttrade)
         self.router.register("/market", "Read-only: /market <MARKET_TICKER>", self._handle_market)
         self.router.register("/event", "Read-only: /event <EVENT_TICKER>", self._handle_event)
+        self.router.register("/event_candidates", "Read-only: rank candidates within an event.", self._handle_event_candidates)
+        self.router.register("/event_recommend", "Read-only: dry-run recommendation within event.", self._handle_event_recommend)
         self.router.register("/refresh", "Read-only: refresh candidates + recommendation.", self._handle_refresh)
         self.router.register("/candidates", "Read-only: top cached candidates.", self._handle_candidates)
         self.router.register("/nexttrade", "Read-only: cached best dry-run recommendation.", self._handle_nexttrade)
@@ -135,8 +137,8 @@ class TelegramApp:
             "🤖 Kalshi Dry-Run Operator Bot",
             "Core: /help /ping /policy /status /team /digest",
             "Account: /balance /positions /orders",
-            "Markets: /markets (/scan) /market <TICKER> /event <EVENT_TICKER>",
-            "Recommendation: /refresh /recommend /candidates /nexttrade /review ...",
+            "Markets: /markets (/scan) /market <TICKER> /event <EVENT_TICKER> /event_candidates <EVENT>",
+            "Recommendation: /refresh /recommend /nexttrade /event_recommend <EVENT> /review ...",
             "Diagnostics: /scanstatus [/scanstatus broad] /scan_debug /scanprefs /why_nexttrade",
             "Safety: live trading disabled by default; no live order route enabled.",
         ]
@@ -319,9 +321,24 @@ class TelegramApp:
 
         lower_ticker = ticker.lower()
         lower_title = title.lower()
-        composite_flag = any(p.lower() in lower_ticker for p in prefs.excluded_ticker_patterns) or any(
+        ticker_parts = [p for p in ticker.split("-") if p]
+        family_member_flag = (
+            ticker.startswith("KX")
+            and len(ticker_parts) >= 3
+            and len(ticker_parts[-1]) <= 6
+            and "," not in title
+        )
+        title_multi_predicate = (
+            title.count(",") >= 2
+            or lower_title.count("yes ") >= 2
+            or "both teams to score" in lower_title
+            or "wins by over" in lower_title
+            or " parlay" in lower_title
+        )
+        pattern_flag = any(p.lower() in lower_ticker for p in prefs.excluded_ticker_patterns) or any(
             p.lower() in lower_title for p in prefs.excluded_title_patterns
         )
+        composite_flag = title_multi_predicate or (pattern_flag and not family_member_flag)
         long_title_flag = len(title) > prefs.max_title_length
 
         quote_live = (0.0 < yes_ask < 1.0) and (0.0 <= yes_bid < yes_ask)
@@ -389,6 +406,7 @@ class TelegramApp:
             "spread": spread,
             "history_signal": round(history_signal, 2),
             "composite_flag": composite_flag,
+            "family_member_flag": family_member_flag,
             "long_title_flag": long_title_flag,
             "close_hours": close_hours,
             "reasons": reasons,
@@ -538,6 +556,34 @@ class TelegramApp:
             return matches[:20], "broad_scan_inference"
         return [], "no_children_found"
 
+    def _seed_markets_from_recent_events(self, max_events: int = 12) -> list[dict[str, Any]]:
+        client, error = self._with_read_client()
+        if client is None:
+            return []
+        collected: dict[str, dict[str, Any]] = {}
+        try:
+            payload = client.public_get("/trade-api/v2/events", params={"limit": max_events}).json()
+            events = payload.get("events") if isinstance(payload.get("events"), list) else []
+            for event in events[:max_events]:
+                if not isinstance(event, dict):
+                    continue
+                event_ticker = event.get("event_ticker") or event.get("ticker")
+                if not event_ticker:
+                    continue
+                try:
+                    expanded = fetch_event_by_ticker(client, str(event_ticker), with_nested_markets=True)
+                    markets = expanded.get("markets") if isinstance(expanded.get("markets"), list) else []
+                    for market in markets:
+                        if isinstance(market, dict) and market.get("ticker"):
+                            collected[market["ticker"]] = market
+                except Exception:
+                    continue
+        except Exception:
+            return []
+        finally:
+            client.close()
+        return list(collected.values())
+
     def _handle_positions(self, _: list[str]) -> str:
         payload, error, path = self._auth_get_first_ok([
             "/trade-api/v2/portfolio/positions",
@@ -654,6 +700,10 @@ class TelegramApp:
                 category = str(market.get("category", "")).lower()
                 if scan_mode == "strict":
                     if self.preferences.strict_scan_exclude_composite and quality["composite_flag"]:
+                        if quality.get("family_member_flag"):
+                            rejection_reasons["event_child_excluded_as_composite"] += 1
+                        else:
+                            rejection_reasons["true_composite_excluded"] += 1
                         rejection_reasons["strict_universe_composite_excluded"] += 1
                         continue
                     if self.preferences.strict_scan_require_interpretable_title and quality["long_title_flag"]:
@@ -667,9 +717,14 @@ class TelegramApp:
                         continue
 
                 if not quality["eligible"]:
+                    if quality.get("family_member_flag"):
+                        rejection_reasons["event_child_excluded_other_reasons"] += 1
                     for reason in quality["reasons"]:
                         rejection_reasons[reason] += 1
                     continue
+
+                if quality.get("family_member_flag"):
+                    diag_counter["event_child_allowed"] += 1
 
                 ranked = dict(market)
                 ranked["scan_score"] = quality["score"]
@@ -678,11 +733,41 @@ class TelegramApp:
                 ranked["scan_quote_quality"] = quality["quote_quality"]
                 ranked["scan_close_hours"] = quality["close_hours"]
                 ranked["scan_composite_flag"] = quality["composite_flag"]
+                ranked["scan_family_member_flag"] = quality.get("family_member_flag")
                 ranked["scan_rationale"] = (
                     f"quote_q={quality['quote_quality']:.2f}, history={quality['history_signal']:.1f}, "
                     f"penalties={','.join(quality['penalties'].keys()) or 'none'}"
                 )
                 candidates.append(ranked)
+
+            if scan_mode == "strict" and len(candidates) < 3:
+                seeded = self._seed_markets_from_recent_events(max_events=15)
+                for market in seeded:
+                    ticker = market.get("ticker")
+                    if not ticker or ticker in by_ticker:
+                        continue
+                    by_ticker[ticker] = market
+                    quality = self._evaluate_market_quality(market)
+                    if self.preferences.strict_scan_exclude_composite and quality["composite_flag"]:
+                        rejection_reasons["strict_universe_composite_excluded"] += 1
+                        continue
+                    if not quality["eligible"]:
+                        rejection_reasons["seeded_event_market_ineligible"] += 1
+                        continue
+                    ranked = dict(market)
+                    ranked["scan_score"] = quality["score"]
+                    ranked["scan_score_parts"] = quality["score_parts"]
+                    ranked["scan_penalties"] = quality["penalties"]
+                    ranked["scan_quote_quality"] = quality["quote_quality"]
+                    ranked["scan_close_hours"] = quality["close_hours"]
+                    ranked["scan_composite_flag"] = quality["composite_flag"]
+                    ranked["scan_family_member_flag"] = quality.get("family_member_flag")
+                    ranked["scan_rationale"] = (
+                        f"quote_q={quality['quote_quality']:.2f}, history={quality['history_signal']:.1f}, "
+                        f"penalties={','.join(quality['penalties'].keys()) or 'none'}, source=event_seed"
+                    )
+                    candidates.append(ranked)
+                diag_counter["seeded_event_markets"] += len(seeded)
 
             candidates.sort(
                 key=lambda item: (
@@ -702,6 +787,7 @@ class TelegramApp:
                 "binary_markets": diag_counter["binary_markets"],
                 "quote_usable": diag_counter["quote_usable"],
                 "history_usable": diag_counter["history_usable"],
+                "event_child_allowed": diag_counter["event_child_allowed"],
                 "final_candidate_count": len(candidates),
                 "top_rejections": rejection_reasons.most_common(3),
                 "rejection_counts": dict(rejection_reasons),
@@ -786,6 +872,7 @@ class TelegramApp:
                 f"strict_scan_max_title_length: {self.preferences.strict_scan_max_title_length}",
                 f"strict_scan_preferred_categories: {self.preferences.strict_scan_preferred_categories or ['none']}",
                 f"strict_scan_excluded_categories: {self.preferences.strict_scan_excluded_categories or ['none']}",
+                "composite classifier scope: contract-level multi-predicate/bundled detection (not merely event-family membership)",
                 f"min_quote_quality: {self.preferences.min_quote_quality}",
                 f"recommendation gate: min_score={self.preferences.min_recommendation_score}, "
                 f"require_live_quote={self.preferences.require_live_quote_for_recommendation}, "
@@ -812,9 +899,13 @@ class TelegramApp:
                 f"Binary markets: {diagnostics.get('binary_markets', 0)}",
                 f"Quote-usable: {diagnostics.get('quote_usable', 0)}",
                 f"History-usable: {diagnostics.get('history_usable', 0)}",
+                f"Event child markets allowed: {diagnostics.get('event_child_allowed', 0)}",
                 f"Final candidates: {diagnostics.get('final_candidate_count', len(candidates))}",
                 f"Top rejection reasons: {rej_text}",
                 f"Excluded by universe: {rej.get('strict_universe_composite_excluded', 0) + rej.get('strict_universe_unreadable_title', 0) + rej.get('strict_universe_non_preferred_category', 0) + rej.get('strict_universe_excluded_category', 0)}",
+                f"True composite excluded: {rej.get('true_composite_excluded', 0)}",
+                f"Event-child excluded as composite: {rej.get('event_child_excluded_as_composite', 0)}",
+                f"Event-child excluded other reasons: {rej.get('event_child_excluded_other_reasons', 0)}",
                 f"Excluded by composite flag: {rej.get('composite/extended pattern', 0) + rej.get('strict_universe_composite_excluded', 0)}",
                 f"Excluded by weak quote: {rej.get('weak quote quality', 0)}",
                 f"Excluded by close-time filter: {rej.get('too close to close time', 0)}",
@@ -927,6 +1018,98 @@ class TelegramApp:
                 "Tip: paste a Kalshi event URL or run /markets to discover related tickers.",
             ]
         )
+
+    def _rank_event_children(self, markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ranked: list[dict[str, Any]] = []
+        for market in markets:
+            if not isinstance(market, dict):
+                continue
+            quality = self._evaluate_market_quality(market)
+            if market.get("status") != "active" or market.get("market_type") != "binary":
+                continue
+            scored = dict(market)
+            scored["scan_score"] = quality["score"]
+            scored["scan_quote_quality"] = quality["quote_quality"]
+            scored["scan_penalties"] = quality["penalties"]
+            scored["scan_rationale"] = (
+                f"quote_q={quality['quote_quality']:.2f}, history={quality['history_signal']:.1f}, "
+                f"penalties={','.join(quality['penalties'].keys()) or 'none'}"
+            )
+            scored["scan_composite_flag"] = quality["composite_flag"]
+            ranked.append(scored)
+        ranked.sort(key=lambda m: (m.get("scan_score", 0.0), m.get("scan_quote_quality", 0.0)), reverse=True)
+        return ranked
+
+    def _handle_event_candidates(self, args: list[str]) -> str:
+        if not args:
+            return "Usage: /event_candidates <EVENT_OR_URL>"
+        resolved = self._resolve_market_or_event(" ".join(args))
+        if resolved.get("kind") != "event":
+            return "Could not resolve event. Try /event <IDENTIFIER> first."
+        event = resolved.get("event", {})
+        event_id = str(event.get("event_ticker", event.get("ticker", resolved.get("identifier", ""))))
+        markets, source = self._expand_event_children(event_id, {"markets": resolved.get("markets", []), **(event if isinstance(event, dict) else {})})
+        ranked = self._rank_event_children(markets)
+        if not ranked:
+            return f"No rankable child markets found for event {event_id} (source={source})."
+        lines = [f"🎯 Event Candidates {event_id} (source={source})"]
+        for i, m in enumerate(ranked[:5]):
+            lines.append(self._format_candidate_line(m, i + 1))
+            lines.append(f"   ↳ {m.get('title', 'n/a')}")
+        return "\n".join(lines)
+
+    def _handle_event_recommend(self, args: list[str]) -> str:
+        if not args:
+            return "Usage: /event_recommend <EVENT_OR_URL>"
+        resolved = self._resolve_market_or_event(" ".join(args))
+        if resolved.get("kind") != "event":
+            return "Could not resolve event. Try /event <IDENTIFIER> first."
+        event = resolved.get("event", {})
+        event_id = str(event.get("event_ticker", event.get("ticker", resolved.get("identifier", ""))))
+        markets, source = self._expand_event_children(event_id, {"markets": resolved.get("markets", []), **(event if isinstance(event, dict) else {})})
+        ranked = self._rank_event_children(markets)
+        if not ranked:
+            return f"No acceptable event child market candidates for {event_id} (source={source})."
+
+        winner = None
+        for candidate in ranked:
+            score = _to_float(candidate.get("scan_score"))
+            quote_q = _to_float(candidate.get("scan_quote_quality"))
+            if score < self.preferences.min_recommendation_score:
+                continue
+            if self.preferences.require_live_quote_for_recommendation and quote_q < self.preferences.min_quote_quality:
+                continue
+            if self.preferences.exclude_composite_for_recommendation and candidate.get("scan_composite_flag"):
+                continue
+            winner = candidate
+            break
+        if winner is None:
+            return f"No acceptable dry-run event recommendation right now for {event_id}."
+
+        max_price = _to_float(winner.get("yes_ask_dollars"), default=0.5)
+        if not (0.0 < max_price < 1.0):
+            max_price = min(0.95, max(0.05, _to_float(winner.get("last_price_dollars"), default=0.5)))
+        review = self.executor.review(
+            TradeIntent(
+                market_ticker=str(winner.get("ticker", "UNKNOWN")),
+                side="YES",
+                contracts=1,
+                max_price_dollars=max_price,
+                rationale=f"event_scoped_recommendation:{event_id}",
+            )
+        )
+        payload = {
+            "market_ticker": winner.get("ticker"),
+            "title": winner.get("title"),
+            "scan_score": winner.get("scan_score"),
+            "scan_rationale": winner.get("scan_rationale"),
+            "scan_penalties": winner.get("scan_penalties", {}),
+            "proposed_side": "YES",
+            "proposed_contracts": 1,
+            "proposed_max_price_dollars": max_price,
+            "executor_review": review.__dict__,
+        }
+        return f"Event source={source}\n" + self._format_recommendation(payload)
 
     def _generate_recommendation(self) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any], str | None]:
         candidates, diagnostics, error = self._fetch_markets_with_diagnostics()

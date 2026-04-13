@@ -156,3 +156,33 @@ def test_event_handles_url_and_market_resolution(monkeypatch):
     }
     text = app.router.dispatch("/event https://kalshi.com/markets/kxtest-1")
     assert "resolved to market ticker" in text
+
+
+def test_event_candidates_and_recommend(monkeypatch):
+    app = _app(monkeypatch)
+    app._resolve_market_or_event = lambda _x: {  # type: ignore[method-assign]
+        "identifier": "EVT-1",
+        "kind": "event",
+        "event": {"event_ticker": "EVT-1", "title": "Event One"},
+        "markets": [],
+    }
+    app._expand_event_children = lambda event_id, payload: (  # type: ignore[method-assign]
+        [
+            {
+                "ticker": "EVT-1-A",
+                "title": "Choice A",
+                "status": "active",
+                "market_type": "binary",
+                "yes_bid_dollars": 0.40,
+                "yes_ask_dollars": 0.45,
+                "last_price_dollars": 0.44,
+                "volume_fp": 20,
+                "open_interest_fp": 30,
+            }
+        ],
+        "test_source",
+    )
+    candidates_text = app.router.dispatch("/event_candidates EVT-1")
+    assert "Event Candidates EVT-1" in candidates_text
+    rec_text = app.router.dispatch("/event_recommend EVT-1")
+    assert "Dry-Run Recommendation" in rec_text
