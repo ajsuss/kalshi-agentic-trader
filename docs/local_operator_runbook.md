@@ -58,8 +58,11 @@ python -m app.interfaces.telegram.main
 5. `/markets` (live read-only top candidates)
 6. `/market <TICKER>`
 7. `/event <EVENT_TICKER>`
-8. `/recommend`
-9. `/review <TICKER> YES 1 0.50` (executor dry-run policy review)
+8. `/scanstatus`
+9. `/recommend`
+10. `/candidates`
+11. `/nexttrade`
+12. `/review <TICKER> YES 1 0.50` (executor dry-run policy review)
 
 ## 6) Stop cleanly
 - Press `Ctrl+C` in the terminal running `run_telegram_app.sh`, or run:
