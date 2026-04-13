@@ -62,6 +62,8 @@ def test_recommend_generates_message(monkeypatch):
                 "event_ticker": "EVT-1",
                 "scan_score": 88.2,
                 "scan_rationale": "live_quote, volume=10",
+                "scan_quote_quality": 0.9,
+                "scan_composite_flag": False,
                 "yes_ask_dollars": 0.52,
                 "last_price_dollars": 0.50,
                 "volume_fp": 10,
@@ -115,3 +117,27 @@ def test_why_nexttrade_explains_winner(monkeypatch):
     text = app.router.dispatch("/why_nexttrade")
     assert "Why Next Trade" in text
     assert "WINNER TEST-1" in text
+
+
+def test_market_handles_event_like_identifier(monkeypatch):
+    app = _app(monkeypatch)
+    app._resolve_market_or_event = lambda _x: {  # type: ignore[method-assign]
+        "identifier": "SOME-EVENT",
+        "kind": "event",
+        "event": {"event_ticker": "SOME-EVENT", "title": "Some Event"},
+        "markets": [{"ticker": "MKT-1", "title": "Choice 1"}],
+    }
+    text = app.router.dispatch("/market some-event")
+    assert "event-like identifier" in text
+    assert "MKT-1" in text
+
+
+def test_event_handles_url_and_market_resolution(monkeypatch):
+    app = _app(monkeypatch)
+    app._resolve_market_or_event = lambda _x: {  # type: ignore[method-assign]
+        "identifier": "KXTEST-1",
+        "kind": "market",
+        "market": {"ticker": "KXTEST-1", "event_ticker": "EVT-1"},
+    }
+    text = app.router.dispatch("/event https://kalshi.com/markets/kxtest-1")
+    assert "resolved to market ticker" in text

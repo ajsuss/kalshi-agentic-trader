@@ -23,5 +23,7 @@
   "min_open_interest": 5.0,
   "min_volume": 5.0,
   "min_quote_quality": 0.2,
-  "min_recommendation_score": 15.0
+  "min_recommendation_score": 15.0,
+  "require_live_quote_for_recommendation": true,
+  "exclude_composite_for_recommendation": true
 }

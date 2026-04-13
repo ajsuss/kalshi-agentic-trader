@@ -44,6 +44,8 @@ class OperatorPreferences:
     penalize_too_far: float = 10.0
     penalize_weak_signal: float = 30.0
     min_recommendation_score: float = 15.0
+    require_live_quote_for_recommendation: bool = True
+    exclude_composite_for_recommendation: bool = True
 
 
 def load_operator_preferences(repo_root: Path) -> OperatorPreferences:

@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -390,6 +392,99 @@ class TelegramApp:
             "reasons": reasons,
         }
 
+    def _normalize_identifier(self, raw: str) -> str:
+        value = raw.strip()
+        if value.startswith("http://") or value.startswith("https://"):
+            parsed = urlparse(value)
+            segments = [s for s in parsed.path.split("/") if s]
+            for segment in reversed(segments):
+                candidate = segment.strip()
+                if candidate and candidate not in {"markets", "event", "events"}:
+                    return candidate.upper()
+        return value.upper()
+
+    def _looks_market_like(self, identifier: str) -> bool:
+        value = identifier.upper()
+        return value.startswith("KX") and "-" in value
+
+    def _cached_similar_matches(self, identifier: str) -> list[str]:
+        key = re.sub(r"[^A-Z0-9]", "", identifier.upper())
+        cached = self._load_cached_recommendation()
+        candidates = cached.get("candidates") or []
+        matches = []
+        for c in candidates:
+            ticker = str(c.get("ticker", ""))
+            title = str(c.get("title", ""))
+            searchable = re.sub(r"[^A-Z0-9]", "", f"{ticker} {title}".upper())
+            if key and key in searchable:
+                matches.append(ticker)
+        return matches[:5]
+
+    def _resolve_market_or_event(self, raw_identifier: str) -> dict[str, Any]:
+        ident = self._normalize_identifier(raw_identifier)
+        attempts: list[str] = []
+        cached_matches = self._cached_similar_matches(ident)
+        client, error = self._with_read_client()
+        if client is None:
+            return {"identifier": ident, "attempts": attempts, "error": f"read_client_unavailable: {error}", "cached_matches": cached_matches}
+
+        try:
+            if self._looks_market_like(ident):
+                attempts.append("market_direct")
+                try:
+                    market_payload = fetch_market_by_ticker(client, ident)
+                    market = market_payload.get("market", market_payload)
+                    if isinstance(market, dict) and market.get("ticker"):
+                        return {
+                            "identifier": ident,
+                            "attempts": attempts,
+                            "kind": "market",
+                            "market": market,
+                            "cached_matches": cached_matches,
+                        }
+                except Exception:
+                    pass
+
+            attempts.append("event_direct")
+            try:
+                event_payload = fetch_event_by_ticker(client, ident, with_nested_markets=True)
+                event = event_payload.get("event", event_payload)
+                if isinstance(event, dict) and (event.get("event_ticker") or event.get("ticker")):
+                    markets = event_payload.get("markets") if isinstance(event_payload.get("markets"), list) else []
+                    return {
+                        "identifier": ident,
+                        "attempts": attempts,
+                        "kind": "event",
+                        "event": event,
+                        "markets": markets,
+                        "cached_matches": cached_matches,
+                    }
+            except Exception:
+                pass
+
+            attempts.append("recent_scan_substring_search")
+            top, _, _ = self._fetch_markets_with_diagnostics(pages=3, limit_per_page=80)
+            if top:
+                normalized = re.sub(r"[^A-Z0-9]", "", ident)
+                for market in top:
+                    ticker = str(market.get("ticker", ""))
+                    event_ticker = str(market.get("event_ticker", ""))
+                    title = str(market.get("title", ""))
+                    blob = re.sub(r"[^A-Z0-9]", "", f"{ticker} {event_ticker} {title}".upper())
+                    if normalized and normalized in blob:
+                        return {
+                            "identifier": ident,
+                            "attempts": attempts,
+                            "kind": "market",
+                            "market": market,
+                            "cached_matches": cached_matches,
+                            "inferred_from_scan": True,
+                        }
+        finally:
+            client.close()
+
+        return {"identifier": ident, "attempts": attempts, "kind": "unknown", "cached_matches": cached_matches}
+
     def _handle_positions(self, _: list[str]) -> str:
         payload, error, path = self._auth_get_first_ok([
             "/trade-api/v2/portfolio/positions",
@@ -623,21 +718,15 @@ class TelegramApp:
     def _handle_market(self, args: list[str]) -> str:
         if not args:
             return "Usage: /market <MARKET_TICKER>"
-
-        ticker = args[0].strip().upper()
-        client, error = self._with_read_client()
-        if client is None:
-            return f"🔎 Market\nUnavailable ({error})."
-
-        try:
-            market_payload = fetch_market_by_ticker(client, ticker)
-            market = market_payload.get("market", market_payload)
+        resolved = self._resolve_market_or_event(args[0])
+        if resolved.get("kind") == "market":
+            market = resolved.get("market", {})
             quality = self._evaluate_market_quality(market if isinstance(market, dict) else {})
             score_parts = quality.get("score_parts", {})
             penalties = quality.get("penalties", {})
             return "\n".join(
                 [
-                    f"🔎 Market {market.get('ticker', ticker)}",
+                    f"🔎 Market {market.get('ticker', resolved.get('identifier', 'n/a'))}",
                     f"Title: {market.get('title', 'n/a')}",
                     f"Event: {market.get('event_ticker', 'n/a')}",
                     f"Status: {market.get('status', 'n/a')}",
@@ -653,39 +742,73 @@ class TelegramApp:
                     f"Penalties: {', '.join(f'{k}={v:.1f}' for k, v in penalties.items()) if penalties else 'none'}",
                 ]
             )
-        except Exception as exc:  # noqa: BLE001
-            return f"🔎 Market\nLookup failed ({exc})."
-        finally:
-            client.close()
+
+        if resolved.get("kind") == "event":
+            event = resolved.get("event", {})
+            markets = resolved.get("markets", []) if isinstance(resolved.get("markets"), list) else []
+            lines = [
+                f"ℹ️ '{resolved.get('identifier')}' appears to be an event-like identifier, not a direct market ticker.",
+                f"Event: {event.get('event_ticker', event.get('ticker', 'n/a'))}",
+                f"Title: {event.get('title', 'n/a')}",
+                "Use /event <IDENTIFIER> for event view, or pick a child market ticker below:",
+            ]
+            for m in markets[:6]:
+                lines.append(f"• {m.get('ticker', 'n/a')} — {m.get('title', 'n/a')}")
+            return "\n".join(lines)
+
+        return "\n".join(
+            [
+                "🔎 Market lookup failed to resolve identifier.",
+                f"Input normalized as: {resolved.get('identifier', 'n/a')}",
+                f"Tried: {', '.join(resolved.get('attempts', []) or ['none'])}",
+                f"Likely type guess: {'market-like' if self._looks_market_like(resolved.get('identifier', '')) else 'event/slug-like'}",
+                f"Similar cached matches: {', '.join(resolved.get('cached_matches', []) or ['none'])}",
+                "Tip: try /event <IDENTIFIER> or /markets and copy a listed ticker.",
+            ]
+        )
 
     def _handle_event(self, args: list[str]) -> str:
         if not args:
             return "Usage: /event <EVENT_TICKER>"
+        resolved = self._resolve_market_or_event(args[0])
 
-        event_ticker = args[0].strip().upper()
-        client, error = self._with_read_client()
-        if client is None:
-            return f"🗂️ Event\nUnavailable ({error})."
-
-        try:
-            event_payload = fetch_event_by_ticker(client, event_ticker, with_nested_markets=True)
-            event = event_payload.get("event", event_payload)
-            markets = event_payload.get("markets", []) if isinstance(event_payload.get("markets"), list) else []
+        if resolved.get("kind") == "event":
+            event = resolved.get("event", {})
+            markets = resolved.get("markets", []) if isinstance(resolved.get("markets"), list) else []
             lines = [
-                f"🗂️ Event {event.get('event_ticker', event_ticker)}",
+                f"🗂️ Event {event.get('event_ticker', event.get('ticker', resolved.get('identifier', 'n/a')))}",
                 f"Title: {event.get('title', 'n/a')}",
                 f"Status: {event.get('status', 'n/a')}",
-                f"Markets: {len(markets)}",
+                f"Close time: {event.get('close_time', event.get('expiration_time', 'n/a'))}",
+                f"Child markets: {len(markets)}",
+                "Use these tickers with /market or /review:",
             ]
-            for m in markets[:5]:
+            for m in markets[:8]:
                 lines.append(
-                    f"• {m.get('ticker', 'n/a')} | last={_fmt_money(m.get('last_price_dollars'))} | yes_ask={_fmt_money(m.get('yes_ask_dollars'))}"
+                    f"• {m.get('ticker', 'n/a')} — {m.get('title', 'n/a')} "
+                    f"(last={_fmt_money(m.get('last_price_dollars'))}, yes_ask={_fmt_money(m.get('yes_ask_dollars'))})"
                 )
             return "\n".join(lines)
-        except Exception as exc:  # noqa: BLE001
-            return f"🗂️ Event\nLookup failed ({exc})."
-        finally:
-            client.close()
+
+        if resolved.get("kind") == "market":
+            market = resolved.get("market", {})
+            return "\n".join(
+                [
+                    f"ℹ️ '{resolved.get('identifier')}' resolved to market ticker {market.get('ticker', 'n/a')}, not event.",
+                    f"Related event ticker: {market.get('event_ticker', 'n/a')}",
+                    "Tip: run /market <ticker> for market details.",
+                ]
+            )
+
+        return "\n".join(
+            [
+                "🗂️ Event lookup failed to resolve identifier.",
+                f"Input normalized as: {resolved.get('identifier', 'n/a')}",
+                f"Tried: {', '.join(resolved.get('attempts', []) or ['none'])}",
+                f"Similar cached matches: {', '.join(resolved.get('cached_matches', []) or ['none'])}",
+                "Tip: paste a Kalshi event URL or run /markets to discover related tickers.",
+            ]
+        )
 
     def _generate_recommendation(self) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any], str | None]:
         candidates, diagnostics, error = self._fetch_markets_with_diagnostics()
@@ -695,40 +818,55 @@ class TelegramApp:
             self._persist_candidates([], None, diagnostics)
             return None, [], diagnostics, "No candidates available from current scan."
 
-        top = candidates[0]
-        if _to_float(top.get("scan_score")) < self.preferences.min_recommendation_score:
+        winner = None
+        for candidate in candidates:
+            score = _to_float(candidate.get("scan_score"))
+            quote_q = _to_float(candidate.get("scan_quote_quality"))
+            composite = bool(candidate.get("scan_composite_flag"))
+            if score < self.preferences.min_recommendation_score:
+                continue
+            if self.preferences.require_live_quote_for_recommendation and quote_q < self.preferences.min_quote_quality:
+                continue
+            if self.preferences.exclude_composite_for_recommendation and composite:
+                continue
+            winner = candidate
+            break
+
+        if winner is None:
             self._persist_candidates(candidates, None, diagnostics)
-            return (
-                None,
-                candidates,
-                diagnostics,
-                f"Top candidate below quality threshold ({_fmt_num(top.get('scan_score'))} < {self.preferences.min_recommendation_score})",
-            )
-        quoted = _to_float(top.get("yes_ask_dollars"), default=0.0)
-        last = _to_float(top.get("last_price_dollars"), default=0.5)
+            return None, candidates, diagnostics, "No acceptable dry-run recommendation right now."
+
+        quoted = _to_float(winner.get("yes_ask_dollars"), default=0.0)
+        last = _to_float(winner.get("last_price_dollars"), default=0.5)
         chosen_price = quoted if 0.0 < quoted < 1.0 else min(0.95, max(0.05, last))
 
         review = self.executor.review(
             TradeIntent(
-                market_ticker=top.get("ticker", "UNKNOWN"),
+                market_ticker=winner.get("ticker", "UNKNOWN"),
                 side="YES",
                 contracts=1,
                 max_price_dollars=float(chosen_price),
-                rationale=f"dry_run_top_scan_candidate ({top.get('scan_rationale', 'n/a')})",
+                rationale=f"dry_run_top_scan_candidate ({winner.get('scan_rationale', 'n/a')})",
             )
         )
         recommendation = {
-            "market_ticker": top.get("ticker"),
-            "event_ticker": top.get("event_ticker"),
-            "title": top.get("title"),
-            "scan_score": top.get("scan_score"),
-            "scan_rationale": top.get("scan_rationale"),
+            "market_ticker": winner.get("ticker"),
+            "event_ticker": winner.get("event_ticker"),
+            "title": winner.get("title"),
+            "scan_score": winner.get("scan_score"),
+            "scan_rationale": winner.get("scan_rationale"),
+            "scan_penalties": winner.get("scan_penalties", {}),
             "proposed_side": "YES",
             "proposed_contracts": 1,
             "proposed_max_price_dollars": chosen_price,
             "executor_review": review.__dict__,
             "generated_at": utc_now_iso(),
             "rationale": "Top ranked market from read-only scan; reviewed via executor policy.",
+            "quality_gate": {
+                "min_score": self.preferences.min_recommendation_score,
+                "require_live_quote": self.preferences.require_live_quote_for_recommendation,
+                "exclude_composite": self.preferences.exclude_composite_for_recommendation,
+            },
         }
         self._persist_candidates(candidates, recommendation, diagnostics)
         return recommendation, candidates, diagnostics, None
@@ -736,6 +874,7 @@ class TelegramApp:
     def _format_recommendation(self, recommendation: dict[str, Any]) -> str:
         review = recommendation.get("executor_review", {})
         reasons = review.get("policy_reasons") or ["none"]
+        penalties = recommendation.get("scan_penalties", {})
         guidance = []
         if "execution_mode_not_live" in reasons:
             guidance.append("set EXECUTION_MODE=live")
@@ -748,6 +887,7 @@ class TelegramApp:
                 f"Side/Contracts: {recommendation.get('proposed_side')} x {recommendation.get('proposed_contracts')}",
                 f"Max price: {_fmt_money(recommendation.get('proposed_max_price_dollars'))}",
                 f"Score: {_fmt_num(recommendation.get('scan_score'))} | Why: {recommendation.get('scan_rationale', 'n/a')}",
+                f"Candidate penalties: {', '.join(penalties.keys()) if penalties else 'none'}",
                 f"Executor result: {'APPROVED' if review.get('approved') else 'BLOCKED'} (dry_run={review.get('dry_run')})",
                 f"Policy reasons: {', '.join(reasons)}",
                 f"To approve: {', '.join(guidance) if guidance else 'already policy-approved'}",
@@ -784,12 +924,19 @@ class TelegramApp:
             return "🧠 Why Next Trade\nNo cached candidates. Run /refresh first."
 
         lines = ["🧠 Why Next Trade (top 3 comparison)"]
+        lines.append(
+            f"Gate: min_score={self.preferences.min_recommendation_score}, "
+            f"require_live_quote={self.preferences.require_live_quote_for_recommendation}, "
+            f"exclude_composite={self.preferences.exclude_composite_for_recommendation}"
+        )
         for idx, c in enumerate(candidates[:3]):
             label = "WINNER" if isinstance(recommendation, dict) and c.get("ticker") == recommendation.get("market_ticker") else f"#{idx+1}"
             penalties = c.get("scan_penalties", {})
             penalty_text = ", ".join(f"{k}:{v:.1f}" for k, v in penalties.items()) if penalties else "none"
+            score = _to_float(c.get("scan_score"))
+            barely = " (barely passed)" if score < (self.preferences.min_recommendation_score + 5.0) else ""
             lines.append(
-                f"{label} {c.get('ticker')} score={_fmt_num(c.get('scan_score'))} "
+                f"{label} {c.get('ticker')} score={_fmt_num(c.get('scan_score'))}{barely} "
                 f"quote_q={_fmt_num(c.get('scan_quote_quality'))} close_h={_fmt_num(c.get('scan_close_hours'))}"
             )
             lines.append(f"   why: {c.get('scan_rationale', 'n/a')}")

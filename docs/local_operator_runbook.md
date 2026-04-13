@@ -64,6 +64,7 @@ python -m app.interfaces.telegram.main
 11. `/nexttrade`
 12. `/why_nexttrade` (why top pick won)
 13. `/review <TICKER> YES 1 0.50` (executor dry-run policy review)
+Tip: `/market` and `/event` also accept pasted Kalshi URLs.
 
 ## 6) Stop cleanly
 - Press `Ctrl+C` in the terminal running `run_telegram_app.sh`, or run:
